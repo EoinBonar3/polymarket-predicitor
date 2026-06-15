@@ -16,7 +16,8 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { useEffect, useState, type ReactNode } from 'react'
 
 import { Toaster, useAutoResolve } from '@/hooks/useAutoResolve'
-import { useBankrollStore } from '@/store/bankroll'
+import { fetchAllData } from '@/lib/supabaseSync'
+import { STARTING_BANKROLL, useBankrollStore } from '@/store/bankroll'
 
 interface ProvidersProps {
   children: ReactNode
@@ -37,13 +38,60 @@ export function Providers({ children }: ProvidersProps) {
       }),
   )
 
-  // Rehydrate the persisted bankroll store after the first client render.
-  // The store is created with `skipHydration: true` so SSR and the initial
-  // client render use the same empty defaults; we then pull the saved
-  // state out of `localStorage` (or the safe in-memory fallback) once it's
-  // safe to do so.
+  // Hydrate the bankroll store after the first client render.
+  //
+  // Order of preference:
+  //   1. Supabase, if it's configured AND has at least one position row —
+  //      Postgres is the durable source of truth once the user has any
+  //      history there.
+  //   2. localStorage (via the persist middleware), as an offline fallback.
+  //
+  // Either path keeps SSR / first-client-render identical because the
+  // store is created with `skipHydration: true` and we only mutate state
+  // here inside `useEffect`, never during render.
   useEffect(() => {
-    void useBankrollStore.persist.rehydrate()
+    let cancelled = false
+
+    const hydrate = async () => {
+      const remoteData = await fetchAllData()
+      if (cancelled) return
+
+      if (remoteData && remoteData.positions.length > 0) {
+        const openPositions = remoteData.positions.filter(
+          (p) => p.status === 'open',
+        )
+        const closedPositions = remoteData.positions.filter(
+          (p) => p.status !== 'open',
+        )
+
+        // Cash balance is the most recent snapshot. We fall back to the
+        // starting bankroll if no snapshots exist (theoretically only
+        // possible if positions were inserted out-of-band without a
+        // matching snapshot row).
+        const lastSnapshot =
+          remoteData.bankrollHistory[remoteData.bankrollHistory.length - 1]
+        const balance = lastSnapshot
+          ? lastSnapshot.balance
+          : STARTING_BANKROLL
+
+        useBankrollStore.setState({
+          openPositions,
+          closedPositions,
+          bankrollHistory: remoteData.bankrollHistory,
+          balance,
+        })
+      } else {
+        // No Supabase data (env unset, table empty, or fetch failed) —
+        // pull the last known state out of localStorage.
+        void useBankrollStore.persist.rehydrate()
+      }
+    }
+
+    void hydrate()
+
+    return () => {
+      cancelled = true
+    }
   }, [])
 
   return (

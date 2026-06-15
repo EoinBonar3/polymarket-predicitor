@@ -21,11 +21,29 @@ export interface Market {
   liquidity: number
   resolvedOutcome: 'YES' | 'NO' | null
   priceHistory?: PricePoint[]
+  /** Hourly volume buckets used by the volume-spike signal. */
+  volumeHistory?: VolumePoint[]
+  /**
+   * Non-generic YES label when outcomes aren't "Yes"/"No" (e.g. team-name
+   * sports markets). Falls back to `title` in the Path A matcher.
+   */
+  yesOutcomeText?: string
 }
 
 export interface PricePoint {
   timestamp: number
   price: number
+}
+
+export interface VolumePoint {
+  timestamp: number
+  /** Total traded volume in this hour (USDC). */
+  volume: number
+  /**
+   * Net volume on the YES side (positive) vs NO side (negative) in this
+   * hour. When omitted the spike signal infers direction from price lean.
+   */
+  yesNetVolume?: number
 }
 
 // ---------------------------------------------------------------------------
@@ -51,6 +69,103 @@ export interface Signal {
   createdAt: string
 }
 
+/**
+ * Per-signal probability estimates used to build a `TradeSignal`'s `ourProbability`.
+ *
+ * Each of `volumeSpike` / `priceMomentum` / `staleMarket` is the standalone
+ * ourP implied if only that signal fired (±4pp nudge from market price).
+ * `blended` is the gated composite actually fed to the Kelly engine.
+ */
+export interface ProbabilityBreakdown {
+  volumeSpike: number
+  priceMomentum: number
+  staleMarket: number
+  blended: number
+  weights: {
+    volumeSpike: number
+    priceMomentum: number
+    staleMarket: number
+  }
+  activeSignals?: {
+    volumeSpike: boolean
+    priceMomentum: boolean
+    staleMarket: boolean
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Trade signals (bet recommendations produced by `lib/signals.ts`)
+// ---------------------------------------------------------------------------
+
+/**
+ * Confidence bucket for `TradeSignal`s, derived from the absolute edge %.
+ *
+ * Intentionally distinct from the upstream `SignalConfidence` above (which
+ * uses 'HIGH' | 'MEDIUM' | 'LOW' on the legacy `Signal` shape) — the
+ * Kelly-driven trade engine has its own thresholds defined in
+ * `lib/signals.ts` and uses lowercase variants for the UI badges.
+ */
+export type TradeSignalConfidence = 'high' | 'medium' | 'low'
+
+/**
+ * A bet recommendation surfaced on the dashboard / market detail pages.
+ *
+ * Lives here (rather than in `lib/signals.ts`) so the bankroll store can
+ * accept a `TradeSignal` on `placeBet` for signals-log persistence without
+ * pulling in the kelly / probability dependency graph.
+ */
+/**
+ * Where did `ourProbability` come from?
+ *   - 'odds_api'   → matched a sports event in The Odds API; `ourProbability`
+ *                    is the vig-removed bookmaker consensus for the matched
+ *                    outcome (much stronger than the structural blender).
+ *   - 'structural' → no Odds API match; `ourProbability` came from the
+ *                    liquidity / time / volume blender in `lib/probability.ts`.
+ */
+export type TradeSignalSource = 'odds_api' | 'structural'
+
+/** Confidence bucket emitted by the `lib/marketMatcher` fuzzy matcher. */
+export type TradeSignalMatchConfidence = 'HIGH' | 'MEDIUM' | 'LOW'
+
+/** Tier label for Odds API (Path A) sports matches — set by `lib/marketMatcher`. */
+export type TradeSignalSportType = 'SPORTS_HIGH_CONF' | 'SPORTS_MED_CONF'
+
+export interface TradeSignal {
+  marketId: string
+  title: string
+  slug: string
+  recommendedOutcome: Outcome
+  marketPrice: number
+  ourProbability: number
+  edgePct: number
+  kellyFraction: number
+  suggestedStake: number
+  expectedValue: number
+  confidence: TradeSignalConfidence
+  /**
+   * Per-signal breakdown of the blended `ourProbability`. Optional because
+   * `TradeSignal`s constructed by older callers / fixtures may not carry it,
+   * AND because odds-api-sourced signals don't have a structural breakdown.
+   */
+  probabilityBreakdown?: ProbabilityBreakdown
+  /**
+   * Source of `ourProbability`. Optional / defaults to `'structural'` so the
+   * existing `buildSignals` output (which doesn't set this field) is treated
+   * as structural without code changes there.
+   */
+  signalSource?: TradeSignalSource
+  /** Fuzzy-match confidence — only present when `signalSource === 'odds_api'`. */
+  matchConfidence?: TradeSignalMatchConfidence
+  /** Bookmaker count that contributed to the consensus — odds_api only. */
+  bookmakerCount?: number
+  /** Path A tier — only present when `signalSource === 'odds_api'`. */
+  signalType?: TradeSignalSportType
+  /** How many structural signals fired (1, 2, or 3) — structural signals only. */
+  signalCount?: number
+  /** Strength bucket: weak=1 signal, moderate=2, strong=3 — structural only. */
+  signalStrength?: 'weak' | 'moderate' | 'strong'
+}
+
 // ---------------------------------------------------------------------------
 // Positions / Portfolio
 // ---------------------------------------------------------------------------
@@ -67,6 +182,7 @@ export interface Position {
   shares: number
   potentialPayout: number
   signalEdge: number
+  ourProbability?: number
   status: PositionStatus
   placedAt: string
   resolvedAt?: string
@@ -130,6 +246,7 @@ export interface GammaMarket {
   question?: string
   slug?: string
   conditionId?: string
+  clobTokenIds?: string | string[]
   endDate?: string
   endDateIso?: string
   category?: string

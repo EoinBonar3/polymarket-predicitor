@@ -94,6 +94,10 @@ export function TradeModal({ signal, open, onClose }: TradeModalProps) {
       stake,
       price,
       signalEdge: signal.edgePct / 100,
+      // Pass the full TradeSignal so the store writes a matching row to
+      // signals_log (structural / odds_api / etc). Without this, only
+      // positions + bankroll_snapshots get persisted.
+      signal,
     })
     if (!result) {
       setSubmitting(false)

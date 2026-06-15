@@ -25,6 +25,9 @@ import {
 import { cn, formatCurrency, formatPercent, formatProfit } from '@/lib/utils'
 import { useBankrollStore, type BankrollPosition } from '@/store/bankroll'
 import type { BankrollHistoryPoint, Outcome } from '@/lib/types'
+import { buildCalibrationData } from '@/lib/calibration'
+import { CalibrationChart } from '@/components/charts/CalibrationChart'
+import { CalibrationStats } from '@/components/charts/CalibrationStats'
 
 interface EquityPoint {
   timestamp: string
@@ -62,6 +65,12 @@ export default function PerformancePage() {
     equityData,
     startingBalance,
   ])
+  // Calibration analytics only depend on the closed-trade history — recompute
+  // when (and only when) that list changes.
+  const calibrationData = useMemo(
+    () => buildCalibrationData(closedPositions),
+    [closedPositions],
+  )
 
   const hasActivity = closedPositions.length > 0 || openPositions.length > 0
 
@@ -87,9 +96,37 @@ export default function PerformancePage() {
           />
           <StatsRow stats={stats} />
           <ClosedPositionsTable rows={closedPositions} />
+          <CalibrationSection data={calibrationData} />
         </>
       )}
     </div>
+  )
+}
+
+function CalibrationSection({
+  data,
+}: {
+  data: ReturnType<typeof buildCalibrationData>
+}) {
+  return (
+    <section aria-labelledby="signal-calibration" className="space-y-3">
+      <div className="flex items-baseline justify-between">
+        <h2
+          id="signal-calibration"
+          className="text-lg font-semibold tracking-tight text-white"
+        >
+          Signal calibration
+          <span className="ml-2 text-sm font-normal text-gray-500">
+            {data.totalResolved} resolved
+          </span>
+        </h2>
+        <p className="hidden text-xs text-gray-500 sm:block">
+          Are our probability estimates honest? — predicted vs. actual.
+        </p>
+      </div>
+      <CalibrationStats data={data} />
+      <CalibrationChart data={data} />
+    </section>
   )
 }
 
@@ -179,11 +216,25 @@ function EquityCurve({
                 fontSize: 12,
               }}
               labelStyle={{ color: '#9ca3af' }}
-              formatter={(value: number) => [formatCurrency(value), 'Balance']}
-              labelFormatter={(label: string, payload) => {
-                const ts = payload?.[0]?.payload?.timestamp
-                if (!ts) return label
+              formatter={(value) => {
+                // Recharts' Formatter sees ValueType | undefined (string | number
+                // | array | undefined). We're charting `balance: number` so coerce
+                // through Number() and fall back to 0 for the impossible cases.
+                const raw = Array.isArray(value) ? value[0] : value
+                const n = Number(raw)
+                return [formatCurrency(Number.isFinite(n) ? n : 0), 'Balance']
+              }}
+              labelFormatter={(label, payload) => {
+                // `label` is typed as ReactNode here; we only fall back to it
+                // when the data point is missing a real timestamp.
+                const first = payload?.[0]
+                const ts =
+                  first && typeof first === 'object' && 'payload' in first
+                    ? (first.payload as { timestamp?: unknown } | undefined)?.timestamp
+                    : undefined
+                if (typeof ts !== 'string') return label
                 const d = new Date(ts)
+                if (Number.isNaN(d.getTime())) return label
                 return d.toLocaleString('en-GB', {
                   day: '2-digit',
                   month: 'short',

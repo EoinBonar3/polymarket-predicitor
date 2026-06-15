@@ -1,107 +1,422 @@
 /**
+
  * Signal engine — turns a list of `Market`s into a ranked list of trade ideas.
+
  *
- * Phase 2 uses a deliberately simple "our probability" model:
+
+ * The "our probability" estimate comes from the 3-signal structural model in
+ * `lib/probability.ts` (`computeStructuralSignal`): volume spike, price
+ * momentum, and stale-market gates. At least 1 of 3 must fire before ourP
+ * is produced. Each `TradeSignal` carries the per-signal breakdown so the
+ * UI can render contribution bars.
+
  *
- *   ourP = yesPrice + shrink * (0.5 - yesPrice)
- *
- * i.e. we shrink the market price slightly toward 50/50 (default shrink = 0.10).
- * The intuition: in practice, retail prediction markets tend to be a bit
- * over-confident at the extremes. This is a placeholder model — Phase 3
- * will swap in news/odds-based estimates without changing this file's
- * public surface.
- *
+
  * For each market we then:
- *   1. Pick the side that has positive edge under our `ourP` estimate.
+
+ *   1. Pick the side that has positive edge under our blended `ourP`.
+
  *   2. Size it with the Kelly criterion from `lib/kelly.ts`.
+
  *   3. Convert that to a £-stake against a £1,000 bankroll.
+
  *   4. Compute a £-EV and confidence bucket for ranking / display.
+
  *
+
  * Signals with no positive edge (Kelly fraction = 0) are filtered out.
+
  * The result is sorted by expected value (£) descending.
+
  */
+
+
 
 import { expectedValue, kellyFraction, suggestedStake } from './kelly'
-import type { Market, Outcome } from './types'
+
+import { computeStructuralSignal } from './probability'
+
+import { syncLogSuppression } from './supabaseSync'
+
+import type {
+
+  Market,
+
+  Outcome,
+
+  TradeSignal,
+
+  TradeSignalConfidence,
+
+} from './types'
+
+
+
+// Re-export the moved types so existing callers (`@/lib/signals`) keep
+
+// working — the canonical home of `TradeSignal` is now `lib/types.ts`.
+
+export type { TradeSignal, TradeSignalConfidence } from './types'
+
+
 
 export const SIGNAL_BANKROLL = 1000
-export const SIGNAL_SHRINK = 0.1
+
 /** Minimum £-stake before we bother showing a signal. */
+
 export const MIN_SUGGESTED_STAKE = 1
 
-export type SignalConfidence = 'high' | 'medium' | 'low'
 
-export interface TradeSignal {
-  marketId: string
-  title: string
-  slug: string
-  recommendedOutcome: Outcome
-  marketPrice: number
-  ourProbability: number
-  edgePct: number
-  kellyFraction: number
-  suggestedStake: number
-  expectedValue: number
-  confidence: SignalConfidence
-}
-
-interface BuildSignalsOptions {
-  bankroll?: number
-  shrink?: number
-  minStake?: number
-}
 
 /**
- * Compute trade signals for a list of markets, sorted by £-EV desc.
+
+ * Structural signals on markets priced < 10% or > 90% YES are mostly
+
+ * shrinkage noise: a 3% market gets pulled toward ~9% on principle alone
+
+ * (the blender distrusts extreme prices) which manufactures phantom edge
+
+ * with no event-specific information behind it. We drop those markets
+
+ * here. Odds-API signals are NOT subject to this filter — bookmaker
+
+ * consensus is a real prior even on lopsided fixtures.
+
  */
+
+const STRUCTURAL_PRICE_FLOOR = 0.08
+
+const STRUCTURAL_PRICE_CEIL = 0.92
+
+
+
+/**
+
+ * Minimum raw edge (probability points, e.g. 0.08 = 8 pp) for a
+
+ * structural signal to be surfaced. Raised to 7 pp now that the structural
+
+ * gate fires on a single signal: a lone weak nudge (e.g. stale = +3 pp) must
+
+ * NOT clear the bar on its own, while a clear volume-spike/momentum lean — or
+
+ * two agreeing signals — comfortably does.
+
+ *
+
+ * Odds-API signals retain the 5% threshold (enforced upstream in their
+
+ * own pipeline) since bookmaker consensus is a much stronger prior.
+
+ */
+
+const STRUCTURAL_MIN_EDGE = 0.07
+
+
+
+/** Per-market structural pipeline outcome when `buildSignals({ debug: true })`. */
+
+export interface SignalDebugEvaluation {
+
+  marketId: string
+
+  title: string
+
+  slug: string
+
+  yesPrice: number
+
+  noPrice: number
+
+  qualified: boolean
+  /** Short label for grouping in the debug UI (e.g. "Edge too small"). */
+  rejectionCategory: string | null
+  rejectionReason: string | null
+
+  ourProbability?: number
+
+  edgePct?: number
+
+  kellyFraction?: number
+
+  suggestedStake?: number
+
+  expectedValue?: number
+
+  recommendedOutcome?: Outcome
+
+}
+
+
+
+interface BuildSignalsOptions {
+
+  bankroll?: number
+
+  minStake?: number
+
+  debug?: boolean
+
+}
+
+
+
+interface MarketEvaluation {
+  rejectionCategory: string | null
+  rejectionReason: string | null
+
+  signal: TradeSignal | null
+
+  yesPrice: number
+
+  noPrice: number
+
+  ourProbability?: number
+
+  edgePct?: number
+
+  kellyFraction?: number
+
+  suggestedStake?: number
+
+  expectedValue?: number
+
+  recommendedOutcome?: Outcome
+
+}
+
+
+
+/**
+
+ * Compute trade signals for a list of markets, sorted by £-EV desc.
+
+ *
+
+ * When `options.debug === true`, returns every evaluated market with a
+
+ * `rejectionReason` instead of only qualified `TradeSignal`s.
+
+ */
+
 export function buildSignals(
+
   markets: Market[],
+
+  options: BuildSignalsOptions & { debug: true },
+
+): SignalDebugEvaluation[]
+
+export function buildSignals(
+
+  markets: Market[],
+
+  options?: BuildSignalsOptions & { debug?: false },
+
+): TradeSignal[]
+
+export function buildSignals(
+
+  markets: Market[],
+
   options: BuildSignalsOptions = {},
-): TradeSignal[] {
+
+): TradeSignal[] | SignalDebugEvaluation[] {
+
   const bankroll = options.bankroll ?? SIGNAL_BANKROLL
-  const shrink = options.shrink ?? SIGNAL_SHRINK
+
   const minStake = options.minStake ?? MIN_SUGGESTED_STAKE
+
+  const debug = options.debug === true
+
+
+
+  if (debug) {
+
+    const evaluations: SignalDebugEvaluation[] = []
+
+
+
+    for (const market of markets) {
+
+      const result = evaluateMarket(market, { bankroll })
+
+      let rejectionCategory = result.rejectionCategory
+      let rejectionReason = result.rejectionReason
+
+      if (!rejectionReason && result.signal && result.signal.suggestedStake < minStake) {
+        rejectionCategory = 'Stake too small'
+        rejectionReason = `Suggested stake is only £${result.signal.suggestedStake.toFixed(2)} — below the £${minStake} minimum.`
+      }
+
+      const qualified = rejectionReason == null && result.signal != null
+
+      evaluations.push({
+        marketId: market.id,
+        title: market.title,
+        slug: market.slug,
+        yesPrice: result.yesPrice,
+        noPrice: result.noPrice,
+        qualified,
+        rejectionCategory: qualified ? null : rejectionCategory,
+        rejectionReason: qualified ? null : rejectionReason,
+
+        ourProbability: result.ourProbability,
+
+        edgePct: result.edgePct,
+
+        kellyFraction: result.kellyFraction,
+
+        suggestedStake: result.suggestedStake,
+
+        expectedValue: result.expectedValue,
+
+        recommendedOutcome: result.recommendedOutcome,
+
+      })
+
+    }
+
+
+
+    console.info(
+
+      `[signals] debug evaluation: ${evaluations.length} markets, ` +
+
+        `${evaluations.filter((e) => e.qualified).length} qualified`,
+
+    )
+
+
+
+    return evaluations
+
+  }
+
+
 
   const signals: TradeSignal[] = []
 
+
+
   for (const market of markets) {
-    const signal = signalForMarket(market, { bankroll, shrink })
-    if (!signal) continue
-    if (signal.suggestedStake < minStake) continue
-    signals.push(signal)
+
+    const result = evaluateMarket(market, { bankroll })
+
+    if (!result.signal) continue
+
+    if (result.signal.suggestedStake < minStake) continue
+
+    signals.push(result.signal)
+
   }
 
+
+
   // Sort by £-EV descending. EV per £ from `expectedValue()` already accounts
+
   // for Polymarket's flat 2% fee assumption, so multiplying by the £-stake
+
   // gives the proper expected profit per bet.
+
   signals.sort((a, b) => b.expectedValue - a.expectedValue)
+
   return signals
+
 }
 
-function signalForMarket(
+
+
+function pct(price: number): string {
+  return `${(price * 100).toFixed(1)}%`
+}
+
+function evaluateMarket(
   market: Market,
-  { bankroll, shrink }: { bankroll: number; shrink: number },
-): TradeSignal | null {
+  { bankroll }: { bankroll: number },
+): MarketEvaluation {
   const yes = market.yesPrice
-  if (!Number.isFinite(yes) || yes <= 0 || yes >= 1) return null
-  const no = Number.isFinite(market.noPrice) && market.noPrice > 0 && market.noPrice < 1
-    ? market.noPrice
-    : 1 - yes
+  const noRaw = market.noPrice
 
-  // Shrinkage-to-0.5 model. When yesPrice < 0.5, ourP_yes > yesPrice → YES has edge.
-  // When yesPrice > 0.5, ourP_yes < yesPrice → NO has edge.
-  const ourP = clampProbability(yes + shrink * (0.5 - yes))
+  if (!Number.isFinite(yes) || yes <= 0 || yes >= 1) {
+    return {
+      rejectionCategory: 'Invalid price',
+      rejectionReason:
+        'Market YES price is missing or stuck at 0% / 100% — nothing to trade on.',
+      signal: null,
+      yesPrice: yes,
+      noPrice: noRaw,
+    }
+  }
 
-  // Score YES and NO sides independently, take the side with the best Kelly.
+  if (yes < STRUCTURAL_PRICE_FLOOR || yes > STRUCTURAL_PRICE_CEIL) {
+    void syncLogSuppression(market, 'price_floor')
+    return {
+      rejectionCategory: 'Price too extreme',
+      rejectionReason: `YES is ${pct(yes)} — structural signals only run between ${pct(STRUCTURAL_PRICE_FLOOR)} and ${pct(STRUCTURAL_PRICE_CEIL)}.`,
+      signal: null,
+      yesPrice: yes,
+      noPrice: noRaw,
+    }
+  }
+
+  const no =
+    Number.isFinite(market.noPrice) && market.noPrice > 0 && market.noPrice < 1
+      ? market.noPrice
+      : 1 - yes
+
+  const structural = computeStructuralSignal(market)
+  if (structural.ourP == null) {
+    return {
+      rejectionCategory: 'Insufficient signal consensus',
+      rejectionReason: structural.rejectionReason,
+      signal: null,
+      yesPrice: yes,
+      noPrice: noRaw,
+    }
+  }
+
+  const ourP = structural.ourP
+  const breakdown = structural.breakdown ?? undefined
+
   const yesSide = evaluateSide('YES', ourP, yes, bankroll)
   const noSide = evaluateSide('NO', 1 - ourP, no, bankroll)
 
   const best = pickBestSide(yesSide, noSide)
-  if (!best || best.kelly <= 0) return null
+  if (!best || best.kelly <= 0) {
+    return {
+      rejectionCategory: 'No edge',
+      rejectionReason: `Model (${pct(ourP)}) roughly agrees with the market (YES ${pct(yes)}, NO ${pct(no)}) — no side looks underpriced.`,
+      signal: null,
+      yesPrice: yes,
+      noPrice: no,
+      ourProbability: ourP,
+    }
+  }
 
-  const edgePct = (best.ourP - best.marketPrice) * 100
+  const rawEdge = best.ourP - best.marketPrice
 
-  return {
+  if (Math.abs(rawEdge) < STRUCTURAL_MIN_EDGE) {
+    const edgePp = Math.abs(rawEdge) * 100
+    const minPp = STRUCTURAL_MIN_EDGE * 100
+    return {
+      rejectionCategory: 'Edge too small',
+      rejectionReason: `Best side is ${best.outcome} with only ${edgePp.toFixed(1)}pp edge (model ${pct(best.ourP)} vs market ${pct(best.marketPrice)}) — need at least ${minPp.toFixed(0)}pp.`,
+      signal: null,
+      yesPrice: yes,
+      noPrice: no,
+      ourProbability: best.ourP,
+      edgePct: rawEdge * 100,
+      kellyFraction: best.kelly,
+      suggestedStake: best.stake,
+      expectedValue: best.evGbp,
+      recommendedOutcome: best.outcome,
+    }
+  }
+
+  const edgePct = rawEdge * 100
+
+  const signal: TradeSignal = {
     marketId: market.id,
     title: market.title,
     slug: market.slug,
@@ -113,51 +428,102 @@ function signalForMarket(
     suggestedStake: best.stake,
     expectedValue: best.evGbp,
     confidence: bucketConfidence(edgePct),
+    probabilityBreakdown: breakdown,
+    signalCount: structural.signalCount,
+    signalStrength: structural.signalStrength ?? undefined,
+  }
+
+  return {
+    rejectionCategory: null,
+    rejectionReason: null,
+    signal,
+    yesPrice: yes,
+    noPrice: no,
+    ourProbability: best.ourP,
+    edgePct,
+    kellyFraction: best.kelly,
+    suggestedStake: best.stake,
+    expectedValue: best.evGbp,
+    recommendedOutcome: best.outcome,
   }
 }
 
+
+
 interface SideEvaluation {
+
   outcome: Outcome
+
   ourP: number
+
   marketPrice: number
+
   kelly: number
+
   stake: number
+
   evGbp: number
+
 }
+
+
 
 function evaluateSide(
+
   outcome: Outcome,
+
   ourP: number,
+
   marketPrice: number,
+
   bankroll: number,
+
 ): SideEvaluation {
+
   const kelly = kellyFraction(ourP, marketPrice)
+
   const stake = suggestedStake(bankroll, kelly)
+
   const evPerPound = expectedValue(ourP, marketPrice)
+
   const evGbp = Math.round(evPerPound * stake * 100) / 100
+
   return { outcome, ourP, marketPrice, kelly, stake, evGbp }
+
 }
+
+
 
 function pickBestSide(
+
   a: SideEvaluation,
+
   b: SideEvaluation,
+
 ): SideEvaluation | null {
+
   if (a.kelly <= 0 && b.kelly <= 0) return null
+
   if (a.kelly <= 0) return b
+
   if (b.kelly <= 0) return a
+
   return a.evGbp >= b.evGbp ? a : b
+
 }
 
-function bucketConfidence(edgePct: number): SignalConfidence {
+
+
+function bucketConfidence(edgePct: number): TradeSignalConfidence {
+
   const abs = Math.abs(edgePct)
+
   if (abs >= 7) return 'high'
+
   if (abs >= 4) return 'medium'
+
   return 'low'
+
 }
 
-function clampProbability(p: number): number {
-  if (!Number.isFinite(p)) return 0.5
-  if (p < 0.01) return 0.01
-  if (p > 0.99) return 0.99
-  return p
-}
+

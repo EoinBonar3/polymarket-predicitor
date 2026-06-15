@@ -16,6 +16,11 @@
 
 import { NextResponse } from 'next/server'
 
+import {
+  buildHistorySourceByMarketId,
+  enrichMarketsWithHistory,
+  historySourceFromGamma,
+} from '@/lib/marketHistory'
 import type {
   ApiError,
   ApiResponse,
@@ -26,6 +31,13 @@ import type {
 } from '@/lib/types'
 
 const GAMMA_BASE_URL = 'https://gamma-api.polymarket.com'
+
+const PRICE_FLOOR = 0.12
+const PRICE_CEIL = 0.88
+const MIN_VOLUME_24H = 500
+const MIN_LIQUIDITY = 1000
+const MIN_DAYS_TO_EXPIRY = 3
+const MAX_DAYS_TO_EXPIRY = 60
 
 /** Re-validate this proxy at most once per 30 s on the server. */
 export const revalidate = 30
@@ -171,16 +183,153 @@ function mapGammaMarket(event: GammaEvent, raw: GammaMarket): Market {
   }
 }
 
-function mapGammaResponse(events: GammaEvent[]): Market[] {
-  const markets: Market[] = []
+function buildHistorySources(events: GammaEvent[]): Map<string, ReturnType<typeof historySourceFromGamma>> {
+  const entries: Array<{ marketId: string; source: ReturnType<typeof historySourceFromGamma> }> = []
+  for (const ref of flattenGammaMarkets(events)) {
+    entries.push({
+      marketId: String(ref.raw.id),
+      source: historySourceFromGamma(ref.raw),
+    })
+  }
+  return buildHistorySourceByMarketId(entries)
+}
+
+function daysToExpiry(endDate: string): number | null {
+  const end = new Date(endDate).getTime()
+  if (!Number.isFinite(end)) return null
+  return (end - Date.now()) / (24 * 60 * 60 * 1000)
+}
+
+interface GammaMarketRef {
+  event: GammaEvent
+  raw: GammaMarket
+}
+
+function flattenGammaMarkets(events: GammaEvent[]): GammaMarketRef[] {
+  const refs: GammaMarketRef[] = []
   for (const event of events) {
     if (!event?.markets) continue
-    for (const m of event.markets) {
-      if (!m?.id) continue
-      markets.push(mapGammaMarket(event, m))
+    for (const raw of event.markets) {
+      if (!raw?.id) continue
+      refs.push({ event, raw })
     }
   }
-  return markets
+  return refs
+}
+
+type FeedRejectionReason =
+  | 'Sub-market inactive'
+  | 'Volume too low'
+  | 'Liquidity too low'
+  | 'Expiry out of range'
+
+interface FeedFilterResult {
+  markets: Market[]
+  mappedBeforeFilter: number
+  activeAfterFilter: number
+  filteredCount: number
+  rejectionCounts: Record<FeedRejectionReason, number>
+  funnel: Record<string, number>
+}
+
+function recordRejection(
+  counts: Record<FeedRejectionReason, number>,
+  reason: FeedRejectionReason,
+  market: { id: string; title: string },
+): void {
+  counts[reason] = (counts[reason] ?? 0) + 1
+  console.info(`[api/markets] rejected: ${reason} — ${market.title} (${market.id})`)
+}
+
+function filterMarketFeed(events: GammaEvent[]): FeedFilterResult {
+  const rejectionCounts: Record<FeedRejectionReason, number> = {
+    'Sub-market inactive': 0,
+    'Volume too low': 0,
+    'Liquidity too low': 0,
+    'Expiry out of range': 0,
+  }
+  const funnel: Record<string, number> = {}
+
+  const allSubMarkets = flattenGammaMarkets(events)
+  const mappedBeforeFilter = allSubMarkets.length
+  funnel.mapped = mappedBeforeFilter
+
+  const activeSubMarkets = allSubMarkets.filter(({ raw }) => {
+    if (raw.active === true) return true
+    recordRejection(rejectionCounts, 'Sub-market inactive', {
+      id: String(raw.id),
+      title: raw.question ?? raw.slug ?? String(raw.id),
+    })
+    return false
+  })
+  funnel.afterActive = activeSubMarkets.length
+  console.info(`[api/markets] After active filter: ${activeSubMarkets.length} markets`)
+
+  let markets = activeSubMarkets.map(({ event, raw }) => mapGammaMarket(event, raw))
+
+  markets = markets.filter((market) => {
+    const keep =
+      market.yesPrice >= PRICE_FLOOR &&
+      market.yesPrice <= PRICE_CEIL
+    return keep
+  })
+  funnel.afterPriceBand = markets.length
+  console.info(`[api/markets] After price band: ${markets.length} markets`)
+
+  markets = markets.filter((market) => {
+    if (market.volume24h >= MIN_VOLUME_24H) return true
+    recordRejection(rejectionCounts, 'Volume too low', {
+      id: market.id,
+      title: market.title,
+    })
+    return false
+  })
+  funnel.afterVolume = markets.length
+  console.info(`[api/markets] After volume filter: ${markets.length} markets`)
+
+  markets = markets.filter((market) => {
+    if (market.liquidity >= MIN_LIQUIDITY) return true
+    recordRejection(rejectionCounts, 'Liquidity too low', {
+      id: market.id,
+      title: market.title,
+    })
+    return false
+  })
+  funnel.afterLiquidity = markets.length
+  console.info(`[api/markets] After liquidity filter: ${markets.length} markets`)
+
+  markets = markets.filter((market) => {
+    const days = daysToExpiry(market.endDate)
+    const keep =
+      days !== null &&
+      days >= MIN_DAYS_TO_EXPIRY &&
+      days <= MAX_DAYS_TO_EXPIRY
+    if (!keep) {
+      recordRejection(rejectionCounts, 'Expiry out of range', {
+        id: market.id,
+        title: market.title,
+      })
+    }
+    return keep
+  })
+  funnel.afterExpiry = markets.length
+  console.info(`[api/markets] After expiry filter: ${markets.length} markets`)
+
+  const activeAfterFilter = markets.length
+  const filteredCount = mappedBeforeFilter - activeAfterFilter
+
+  console.info(
+    `[api/markets] mapped=${mappedBeforeFilter} active=${activeAfterFilter} filtered=${filteredCount}`,
+  )
+
+  return {
+    markets,
+    mappedBeforeFilter,
+    activeAfterFilter,
+    filteredCount,
+    rejectionCounts,
+    funnel,
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -250,7 +399,18 @@ export async function GET(request: Request) {
 
     const raw = (await response.json()) as GammaEvent[] | { events?: GammaEvent[] }
     const events: GammaEvent[] = Array.isArray(raw) ? raw : raw.events ?? []
-    let markets = mapGammaResponse(events)
+    const {
+      markets: filteredMarkets,
+      mappedBeforeFilter,
+      activeAfterFilter,
+      filteredCount,
+      rejectionCounts,
+      funnel,
+    } = filterMarketFeed(events)
+    let markets = filteredMarkets
+
+    const historySources = buildHistorySources(events)
+    markets = await enrichMarketsWithHistory(markets, historySources)
 
     // Client-side category filter as a safety net — Gamma's `tag` param is
     // sometimes inexact, so we double-filter here to honour the user's intent.
@@ -259,15 +419,33 @@ export async function GET(request: Request) {
       markets = markets.filter((m) => m.category.toLowerCase().includes(needle))
     }
 
-    const body: ApiResponse<Market[]> = {
+    const body: ApiResponse<Market[]> & {
+      debug: {
+        mappedBeforeFilter: number
+        activeAfterFilter: number
+        filteredCount: number
+        rejectionCounts: Record<FeedRejectionReason, number>
+        funnel: Record<string, number>
+      }
+    } = {
       data: markets,
       count: markets.length,
       fetchedAt: new Date().toISOString(),
+      debug: {
+        mappedBeforeFilter,
+        activeAfterFilter,
+        filteredCount,
+        rejectionCounts,
+        funnel,
+      },
     }
 
     return NextResponse.json(body, {
       headers: {
         'Cache-Control': 'public, s-maxage=30, stale-while-revalidate=60',
+        'X-Markets-Mapped-Count': String(mappedBeforeFilter),
+        'X-Markets-Active-Count': String(activeAfterFilter),
+        'X-Markets-Filtered-Count': String(filteredCount),
       },
     })
   } catch (error) {

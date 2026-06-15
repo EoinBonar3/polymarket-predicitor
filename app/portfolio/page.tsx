@@ -255,7 +255,11 @@ function PositionRow({ row }: { row: MarkedPosition }) {
     <tr className="transition hover:bg-gray-900/60">
       <td className="px-4 py-3">
         <Link
-          href="/dashboard"
+          // `BankrollPosition` carries the upstream `slug` alongside `marketId`
+          // (see `store/bankroll.ts`) — the detail route is slug-based, so we
+          // use that. Falls back to the dashboard for legacy positions saved
+          // before the slug was tracked.
+          href={position.slug ? `/market/${position.slug}` : '/dashboard'}
           className="line-clamp-2 max-w-md font-medium text-gray-100 hover:text-emerald-300"
           title={position.marketTitle}
         >

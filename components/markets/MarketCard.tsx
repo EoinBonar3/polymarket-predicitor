@@ -9,6 +9,8 @@
  * data is loading.
  */
 
+import Link from 'next/link'
+
 import { clamp, cn, formatPercent, formatTimeUntilExpiry, formatVolume } from '@/lib/utils'
 import type { Market } from '@/lib/types'
 
@@ -25,68 +27,80 @@ export function MarketCard({ market }: MarketCardProps) {
   const yesFavoured = yes >= no
 
   return (
-    <article className="group flex h-full flex-col gap-4 rounded-xl border border-gray-800 bg-gray-900/60 p-5 shadow-sm transition hover:border-gray-700 hover:bg-gray-900/80">
-      <header className="flex items-start justify-between gap-3">
-        <span className="inline-flex items-center rounded-full border border-gray-700/80 bg-gray-800/60 px-2.5 py-0.5 text-[11px] font-medium uppercase tracking-wide text-gray-300">
-          {market.category || 'Uncategorised'}
-        </span>
-        <span
-          className={cn(
-            'text-xs font-medium',
-            timeBadgeTone(market.endDate),
-          )}
-        >
-          {formatTimeUntilExpiry(market.endDate)}
-        </span>
-      </header>
-
-      <h3 className="text-base font-semibold leading-snug text-gray-50 line-clamp-3">
-        {market.title}
-      </h3>
-
-      <div className="mt-auto space-y-3">
-        <div className="flex items-center justify-between text-xs font-medium">
-          <span className={cn('flex items-center gap-1.5', yesFavoured ? 'text-emerald-400' : 'text-gray-400')}>
-            <span className="h-2 w-2 rounded-full bg-emerald-500" aria-hidden />
-            YES {formatPercent(yes)}
+    // The link wraps the whole card so the entire surface is clickable. The
+    // dashboard grid passes us a single grid cell, so `block h-full` makes the
+    // anchor fill the cell — keeping the card's existing layout unchanged.
+    // No interactive children inside the article, so no event-stopPropagation
+    // dance is needed yet; if that changes, add `e.stopPropagation()` to the
+    // child handler rather than swapping this wrapper for a div+onClick.
+    <Link
+      href={`/market/${market.slug}`}
+      className="block h-full rounded-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/40"
+      aria-label={`Open market: ${market.title}`}
+    >
+      <article className="group flex h-full flex-col gap-4 rounded-xl border border-gray-800 bg-gray-900/60 p-5 shadow-sm transition hover:border-gray-700 hover:bg-gray-900/80">
+        <header className="flex items-start justify-between gap-3">
+          <span className="inline-flex items-center rounded-full border border-gray-700/80 bg-gray-800/60 px-2.5 py-0.5 text-[11px] font-medium uppercase tracking-wide text-gray-300">
+            {market.category || 'Uncategorised'}
           </span>
-          <span className={cn('flex items-center gap-1.5', !yesFavoured ? 'text-rose-400' : 'text-gray-400')}>
-            NO {formatPercent(no)}
-            <span className="h-2 w-2 rounded-full bg-rose-500" aria-hidden />
+          <span
+            className={cn(
+              'text-xs font-medium',
+              timeBadgeTone(market.endDate),
+            )}
+          >
+            {formatTimeUntilExpiry(market.endDate)}
           </span>
-        </div>
+        </header>
 
-        <div
-          role="img"
-          aria-label={`Implied probabilities: YES ${formatPercent(yes)}, NO ${formatPercent(no)}`}
-          className="flex h-2 w-full overflow-hidden rounded-full bg-gray-800"
-        >
-          <div
-            className="h-full bg-emerald-500/90 transition-[width]"
-            style={{ width: `${yesPct}%` }}
-          />
-          <div
-            className="h-full bg-rose-500/90 transition-[width]"
-            style={{ width: `${noPct}%` }}
-          />
-        </div>
+        <h3 className="text-base font-semibold leading-snug text-gray-50 line-clamp-3">
+          {market.title}
+        </h3>
 
-        <dl className="flex items-center justify-between gap-2 pt-1 text-[11px] text-gray-400">
-          <div className="flex flex-col">
-            <dt className="uppercase tracking-wide text-gray-500">24h Vol</dt>
-            <dd className="text-sm font-semibold text-gray-100">
-              {formatVolume(market.volume24h)}
-            </dd>
+        <div className="mt-auto space-y-3">
+          <div className="flex items-center justify-between text-xs font-medium">
+            <span className={cn('flex items-center gap-1.5', yesFavoured ? 'text-emerald-400' : 'text-gray-400')}>
+              <span className="h-2 w-2 rounded-full bg-emerald-500" aria-hidden />
+              YES {formatPercent(yes)}
+            </span>
+            <span className={cn('flex items-center gap-1.5', !yesFavoured ? 'text-rose-400' : 'text-gray-400')}>
+              NO {formatPercent(no)}
+              <span className="h-2 w-2 rounded-full bg-rose-500" aria-hidden />
+            </span>
           </div>
-          <div className="flex flex-col items-end">
-            <dt className="uppercase tracking-wide text-gray-500">Liquidity</dt>
-            <dd className="text-sm font-semibold text-gray-100">
-              {formatVolume(market.liquidity)}
-            </dd>
+
+          <div
+            role="img"
+            aria-label={`Implied probabilities: YES ${formatPercent(yes)}, NO ${formatPercent(no)}`}
+            className="flex h-2 w-full overflow-hidden rounded-full bg-gray-800"
+          >
+            <div
+              className="h-full bg-emerald-500/90 transition-[width]"
+              style={{ width: `${yesPct}%` }}
+            />
+            <div
+              className="h-full bg-rose-500/90 transition-[width]"
+              style={{ width: `${noPct}%` }}
+            />
           </div>
-        </dl>
-      </div>
-    </article>
+
+          <dl className="flex items-center justify-between gap-2 pt-1 text-[11px] text-gray-400">
+            <div className="flex flex-col">
+              <dt className="uppercase tracking-wide text-gray-500">24h Vol</dt>
+              <dd className="text-sm font-semibold text-gray-100">
+                {formatVolume(market.volume24h)}
+              </dd>
+            </div>
+            <div className="flex flex-col items-end">
+              <dt className="uppercase tracking-wide text-gray-500">Liquidity</dt>
+              <dd className="text-sm font-semibold text-gray-100">
+                {formatVolume(market.liquidity)}
+              </dd>
+            </div>
+          </dl>
+        </div>
+      </article>
+    </Link>
   )
 }
 

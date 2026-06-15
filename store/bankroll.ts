@@ -8,12 +8,19 @@
  *   - open positions (active bets)
  *   - closed positions (settled bets, with realised P&L)
  *
- * Phase 4: persisted across reloads via `localStorage`, with a graceful
- * fallback to an in-memory map when storage is unavailable (sandboxed
- * iframes, SSR, Safari private mode, quota exceeded, etc.). Rehydration
- * is opt-in (`skipHydration: true`) and triggered from `app/providers.tsx`
- * after mount so the initial server render and the first client render
- * always agree.
+ * Persistence model (post-Supabase migration):
+ *
+ *   - `localStorage` (via the `persist` middleware below) remains the
+ *     offline fallback — if the user opens the app with no network, or
+ *     no Supabase env vars set, we still see their previous state.
+ *   - Every mutating action ALSO fires a write-through call into
+ *     `lib/supabaseSync.ts` (no `await`, never blocking). When Supabase
+ *     is configured, Postgres is the durable source of truth and we
+ *     hydrate from it on app load (`app/providers.tsx`).
+ *
+ * Rehydration is opt-in (`skipHydration: true`) and triggered from
+ * `app/providers.tsx` after mount so the initial server render and the
+ * first client render always agree.
  */
 
 import { create } from 'zustand'
@@ -23,7 +30,18 @@ import {
   type StateStorage,
 } from 'zustand/middleware'
 
-import type { BankrollHistoryPoint, Outcome, Position } from '@/lib/types'
+import type {
+  BankrollHistoryPoint,
+  Outcome,
+  Position,
+  TradeSignal,
+} from '@/lib/types'
+import {
+  resetAllData,
+  syncCloseBet,
+  syncLogSignal,
+  syncPlaceBet,
+} from '@/lib/supabaseSync'
 import { generateId } from '@/lib/utils'
 
 export const STARTING_BANKROLL = 1000
@@ -46,6 +64,14 @@ interface PlaceBetInput {
   stake: number
   price: number
   signalEdge?: number
+  ourProbability?: number
+  /**
+   * Optional — when present, the `TradeSignal` that triggered the bet is
+   * logged to Supabase's `signals_log` table for downstream ML work. We
+   * only ever log signals that were actually acted on (the dashboard
+   * generates hundreds per poll, so wholesale logging would be noisy).
+   */
+  signal?: TradeSignal
 }
 
 interface BankrollState {
@@ -137,7 +163,17 @@ export const useBankrollStore = create<BankrollState>()(
       // has any activity.
       bankrollHistory: [],
 
-      placeBet: ({ marketId, slug, title, outcome, stake, price, signalEdge = 0 }) => {
+      placeBet: ({
+        marketId,
+        slug,
+        title,
+        outcome,
+        stake,
+        price,
+        signalEdge = 0,
+        ourProbability,
+        signal,
+      }) => {
         if (
           !Number.isFinite(stake) ||
           !Number.isFinite(price) ||
@@ -167,6 +203,7 @@ export const useBankrollStore = create<BankrollState>()(
           shares,
           potentialPayout,
           signalEdge,
+          ourProbability,
           status: 'open',
           placedAt: now,
         }
@@ -195,6 +232,13 @@ export const useBankrollStore = create<BankrollState>()(
             { timestamp: now, balance: newBalance },
           ],
         })
+
+        // Write-through to Supabase. Fire-and-forget: never await, never
+        // block the UI, errors are swallowed inside `supabaseSync`.
+        void syncPlaceBet(position, newBalance)
+        if (signal) {
+          void syncLogSignal(signal, position.id)
+        }
 
         return position
       },
@@ -228,6 +272,16 @@ export const useBankrollStore = create<BankrollState>()(
           bankrollHistory: [...bankrollHistory, { timestamp: now, balance: newBalance }],
         })
 
+        void syncCloseBet(
+          positionId,
+          {
+            status: closed.status === 'won' ? 'won' : 'lost',
+            profit,
+            resolvedAt: now,
+          },
+          newBalance,
+        )
+
         return closed
       },
 
@@ -239,6 +293,8 @@ export const useBankrollStore = create<BankrollState>()(
           closedPositions: [],
           bankrollHistory: [],
         })
+
+        void resetAllData()
       },
     }),
     {

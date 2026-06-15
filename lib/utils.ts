@@ -113,6 +113,9 @@ const HOUR = 60 * MINUTE
 const DAY = 24 * HOUR
 const WEEK = 7 * DAY
 
+export const DAY_MS = 24 * 60 * 60 * 1000
+export const FIVE_MINUTES_MS = 5 * 60 * 1000
+
 /** Coerce string | number | Date inputs to a `Date`. */
 export function toDate(value: string | number | Date): Date {
   return value instanceof Date ? value : new Date(value)
@@ -205,6 +208,37 @@ export function cn(...inputs: Array<string | false | null | undefined>): string 
 
 /** Generate a short, URL-safe id without a dependency. */
 export function generateId(prefix = 'id'): string {
-  const random = Math.random().toString(36).slice(2, 10)
-  return `${prefix}_${Date.now().toString(36)}_${random}`
+  return `${prefix}_${crypto.randomUUID().replace(/-/g, '')}`
+}
+
+// ---------------------------------------------------------------------------
+// Statistics
+// ---------------------------------------------------------------------------
+
+/**
+ * Wilson score confidence interval for a proportion.
+ *
+ * Statistically correct for small sample sizes and extreme probabilities —
+ * unlike the naive normal-approximation interval, Wilson never produces
+ * bounds outside [0, 1] and stays well-calibrated near p = 0 / p = 1.
+ *
+ * @param successes number of successful trials
+ * @param total     total trials
+ * @param z         z-score (default 1.96 → 95% CI)
+ */
+export function wilsonInterval(
+  successes: number,
+  total: number,
+  z = 1.96,
+): { lower: number; upper: number } {
+  if (total === 0) return { lower: 0, upper: 1 }
+  const p = successes / total
+  const denominator = 1 + (z * z) / total
+  const centre = p + (z * z) / (2 * total)
+  const spread =
+    z * Math.sqrt((p * (1 - p)) / total + (z * z) / (4 * total * total))
+  return {
+    lower: Math.max(0, (centre - spread) / denominator),
+    upper: Math.min(1, (centre + spread) / denominator),
+  }
 }

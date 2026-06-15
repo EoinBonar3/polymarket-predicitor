@@ -137,11 +137,10 @@ export async function fetchActiveMarkets(
 }
 
 /**
- * Fetch a single market by slug.
- *
- * NOTE: The dedicated `/api/markets/[slug]` route lands in Phase 1. Until
- * then we transparently fall back to filtering the active markets list
- * client-side, so callers can already rely on this signature.
+ * Fetch a single market by slug via the dedicated `/api/markets/[slug]`
+ * proxy. Returns `null` (not throw) when the slug doesn't resolve to any
+ * active or closed market, so TanStack Query callers can render a clean
+ * "not found" state without an error boundary.
  */
 export async function fetchMarketBySlug(
   slug: string,
@@ -158,12 +157,11 @@ export async function fetchMarketBySlug(
     })
     return body.data ?? null
   } catch (error) {
-    // Phase-0 fallback: the dedicated per-slug route lands in Phase 1, so
-    // when it 404s we transparently scan the active markets list. Any other
-    // error is real — re-throw so TanStack Query / callers can react.
+    // 404 means "this slug doesn't match any active or closed market" —
+    // a normal not-found we surface as `null`. Any other status is a real
+    // failure (5xx, network, etc.) and bubbles up to the caller.
     if (error instanceof PolymarketClientError && error.status === 404) {
-      const all = await fetchActiveMarkets({ limit: 200 }, signal)
-      return all.find((m) => m.slug === slug) ?? null
+      return null
     }
     throw error
   }

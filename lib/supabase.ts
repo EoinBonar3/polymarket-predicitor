@@ -1,0 +1,47 @@
+/**
+ * Supabase client singleton.
+ *
+ * `supabase` is intentionally nullable: if the env vars aren't set (e.g. a
+ * fresh local dev clone with no Supabase project yet) we want the rest of
+ * the app to keep working against `localStorage` only. Every caller in
+ * `lib/supabaseSync.ts` checks `if (!supabase) return …` and silently
+ * no-ops when the client is null.
+ */
+
+import { createClient } from '@supabase/supabase-js'
+
+const url = process.env.NEXT_PUBLIC_SUPABASE_URL
+const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+
+export const supabase = url && key ? createClient(url, key) : null
+
+// ---------------------------------------------------------------------------
+// Row shapes — snake_case mirror of the Postgres tables we own.
+// Kept here (not in `lib/types.ts`) so the rest of the app never sees the
+// database column naming — it only ever deals with the domain types from
+// `lib/types.ts` via the mappers in `lib/supabaseSync.ts`.
+// ---------------------------------------------------------------------------
+
+export type SupabasePosition = {
+  id: string
+  market_id: string
+  market_title: string
+  outcome: 'YES' | 'NO'
+  stake: number
+  price: number
+  shares: number
+  potential_payout: number
+  signal_edge: number
+  our_probability?: number
+  status: 'open' | 'won' | 'lost'
+  placed_at: string
+  resolved_at: string | null
+  profit: number | null
+  market_slug: string | null
+}
+
+export type SupabaseBankrollSnapshot = {
+  id: string
+  balance: number
+  snapshot_at: string
+}
