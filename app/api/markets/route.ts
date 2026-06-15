@@ -34,10 +34,10 @@ const GAMMA_BASE_URL = 'https://gamma-api.polymarket.com'
 
 const PRICE_FLOOR = 0.12
 const PRICE_CEIL = 0.88
-const MIN_VOLUME_24H = 500
+const MIN_VOLUME_24H = 200
 const MIN_LIQUIDITY = 1000
 const MIN_DAYS_TO_EXPIRY = 3
-const MAX_DAYS_TO_EXPIRY = 60
+const MAX_DAYS_TO_EXPIRY = 180
 
 /** Re-validate this proxy at most once per 30 s on the server. */
 export const revalidate = 30
@@ -302,8 +302,7 @@ function filterMarketFeed(events: GammaEvent[]): FeedFilterResult {
     const days = daysToExpiry(market.endDate)
     const keep =
       days !== null &&
-      days >= MIN_DAYS_TO_EXPIRY &&
-      days <= MAX_DAYS_TO_EXPIRY
+      days >= MIN_DAYS_TO_EXPIRY
     if (!keep) {
       recordRejection(rejectionCounts, 'Expiry out of range', {
         id: market.id,

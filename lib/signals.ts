@@ -36,6 +36,8 @@ import { expectedValue, kellyFraction, suggestedStake } from './kelly'
 
 import { computeStructuralSignal } from './probability'
 
+import type { LearnedModel } from './learning'
+
 import { syncLogSuppression } from './supabaseSync'
 
 import type {
@@ -110,7 +112,7 @@ const STRUCTURAL_PRICE_CEIL = 0.92
 
  */
 
-const STRUCTURAL_MIN_EDGE = 0.07
+const STRUCTURAL_MIN_EDGE = 0.04
 
 
 
@@ -156,6 +158,14 @@ interface BuildSignalsOptions {
   minStake?: number
 
   debug?: boolean
+
+  /**
+   * Learned calibration model (from resolved bet history). When supplied and
+   * active, `ourProbability` is remapped through it before edge / Kelly so the
+   * engine bets on calibrated belief, not the raw structural nudges. Omit (or
+   * pass an inactive model) and the engine behaves exactly as before.
+   */
+  calibration?: LearnedModel
 
 }
 
@@ -239,7 +249,7 @@ export function buildSignals(
 
     for (const market of markets) {
 
-      const result = evaluateMarket(market, { bankroll })
+      const result = evaluateMarket(market, { bankroll, calibration: options.calibration })
 
       let rejectionCategory = result.rejectionCategory
       let rejectionReason = result.rejectionReason
@@ -301,7 +311,7 @@ export function buildSignals(
 
   for (const market of markets) {
 
-    const result = evaluateMarket(market, { bankroll })
+    const result = evaluateMarket(market, { bankroll, calibration: options.calibration })
 
     if (!result.signal) continue
 
@@ -333,7 +343,7 @@ function pct(price: number): string {
 
 function evaluateMarket(
   market: Market,
-  { bankroll }: { bankroll: number },
+  { bankroll, calibration }: { bankroll: number; calibration?: LearnedModel },
 ): MarketEvaluation {
   const yes = market.yesPrice
   const noRaw = market.noPrice
@@ -365,7 +375,13 @@ function evaluateMarket(
       ? market.noPrice
       : 1 - yes
 
-  const structural = computeStructuralSignal(market)
+  // Layer 1: scale each signal's nudge by its learned reliability before the
+  // probability is even formed, so `ourP` already reflects what each signal has
+  // historically been worth (identity at cold start).
+  const structural = computeStructuralSignal(market, {
+    reliability: calibration?.reliability,
+  })
+
   if (structural.ourP == null) {
     return {
       rejectionCategory: 'Insufficient signal consensus',
@@ -379,8 +395,12 @@ function evaluateMarket(
   const ourP = structural.ourP
   const breakdown = structural.breakdown ?? undefined
 
-  const yesSide = evaluateSide('YES', ourP, yes, bankroll)
-  const noSide = evaluateSide('NO', 1 - ourP, no, bankroll)
+  // Layer 2: confidence-scaled (fractional) Kelly — shrink the sizing globally
+  // by how overconfident the model has historically been. 1 at cold start.
+  const kellyMultiplier = calibration?.kellyMultiplier ?? 1
+
+  const yesSide = evaluateSide('YES', ourP, yes, bankroll, kellyMultiplier)
+  const noSide = evaluateSide('NO', 1 - ourP, no, bankroll, kellyMultiplier)
 
   const best = pickBestSide(yesSide, noSide)
   if (!best || best.kelly <= 0) {
@@ -478,9 +498,12 @@ function evaluateSide(
 
   bankroll: number,
 
+  kellyMultiplier = 1,
+
 ): SideEvaluation {
 
-  const kelly = kellyFraction(ourP, marketPrice)
+  // Full Kelly first, then the learned fractional-Kelly scalar (Layer 2).
+  const kelly = kellyFraction(ourP, marketPrice) * kellyMultiplier
 
   const stake = suggestedStake(bankroll, kelly)
 

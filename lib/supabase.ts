@@ -38,6 +38,15 @@ export type SupabasePosition = {
   resolved_at: string | null
   profit: number | null
   market_slug: string | null
+  // Signal provenance for the closed-loop learner (`lib/learning.ts`). All
+  // nullable — odds-api / legacy bets may not carry the structural breakdown.
+  // See the migration note at the top of `lib/supabaseSync.ts`.
+  signal_source?: 'structural' | 'odds_api' | null
+  signal_count?: number | null
+  signal_strength?: 'weak' | 'moderate' | 'strong' | null
+  active_volume_spike?: boolean | null
+  active_price_momentum?: boolean | null
+  active_stale_market?: boolean | null
 }
 
 export type SupabaseBankrollSnapshot = {

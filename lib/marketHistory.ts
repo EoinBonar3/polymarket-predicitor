@@ -37,6 +37,13 @@ interface GammaTrade {
 
 const historyCache = new Map<string, CachedHistory>()
 
+/**
+ * Fallback YES-token-id lookup cache (conditionId → token id). In-memory
+ * only, 5-minute TTL ({@link CACHE_TTL_MS}), so repeated feed refreshes don't
+ * re-hit the CLOB `/markets/{conditionId}` endpoint for the same market.
+ */
+const tokenIdCache = new Map<string, { tokenId: string; expiresAt: number }>()
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
@@ -149,6 +156,44 @@ function parsePriceHistory(
   return points.sort((a, b) => a.timestamp - b.timestamp)
 }
 
+/**
+ * Fallback: resolve a market's YES token id from its `conditionId` via the
+ * CLOB `/markets/{conditionId}` endpoint, for markets whose Gamma payload
+ * carried no `clobTokenIds`. Cached in-memory for {@link CACHE_TTL_MS}.
+ * Never throws — returns `undefined` on any failure.
+ */
+async function fetchTokenIdFromConditionId(
+  conditionId: string,
+): Promise<string | undefined> {
+  if (!conditionId) return undefined
+
+  const cached = tokenIdCache.get(conditionId)
+  if (cached && Date.now() < cached.expiresAt) {
+    return cached.tokenId
+  }
+
+  const url = `${CLOB_BASE_URL}/markets/${encodeURIComponent(conditionId)}`
+  const response = await fetchWithRetry(url)
+  if (!response?.ok) return undefined
+
+  try {
+    const raw = (await response.json()) as {
+      tokens?: Array<{ token_id?: string }>
+    }
+    const tokenId = raw.tokens?.[0]?.token_id
+    if (typeof tokenId === 'string' && tokenId !== '') {
+      tokenIdCache.set(conditionId, {
+        tokenId,
+        expiresAt: Date.now() + CACHE_TTL_MS,
+      })
+      return tokenId
+    }
+    return undefined
+  } catch {
+    return undefined
+  }
+}
+
 async function fetchPriceHistory(yesTokenId: string | undefined): Promise<PricePoint[]> {
   if (!yesTokenId) return []
 
@@ -241,7 +286,10 @@ async function fetchVolumeHistory(
   conditionId: string | undefined,
 ): Promise<VolumePoint[]> {
   let trades = await fetchTradesFromGamma(marketId)
-  if (trades === null && conditionId) {
+  if (trades === null) {
+    // Gamma 404'd — only the Data API fallback remains, and it needs a
+    // conditionId. Guard here so we never issue a `?market=undefined` request.
+    if (!conditionId) return []
     trades = await fetchTradesFromDataApi(conditionId)
   }
   if (!trades || trades.length === 0) return []
@@ -327,10 +375,30 @@ export async function enrichMarketsWithHistory(
 
   await fetchInBatches(markets, async (market) => {
     const source = sourcesByMarketId.get(market.id)
+
+    // Fallback: if Gamma gave us no CLOB token id but we do have a
+    // conditionId, resolve the YES token from the CLOB `/markets` endpoint
+    // before giving up on price history.
+    if (source && !source.yesTokenId && source.conditionId) {
+      const fallbackTokenId = await fetchTokenIdFromConditionId(source.conditionId)
+      if (fallbackTokenId) {
+        source.yesTokenId = fallbackTokenId
+      }
+    }
+
+    // Temporary debug logs — remove once history population is confirmed.
+    console.log(
+      `[history] market ${market.id}: yesTokenId=${source?.yesTokenId}, conditionId=${source?.conditionId}`,
+    )
+
     const { priceHistory, volumeHistory } = await fetchHistoryForMarket(market, source)
     market.priceHistory = priceHistory
     market.volumeHistory = volumeHistory
     await logFirstMarketHistory(market, source, priceHistory, volumeHistory)
+
+    console.log(
+      `[history] market ${market.id}: priceHistory.length=${market.priceHistory?.length ?? 0}, volumeHistory.length=${market.volumeHistory?.length ?? 0}`,
+    )
   })
 
   return markets

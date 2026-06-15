@@ -37,6 +37,8 @@ import {
 } from '@/lib/oddsApi'
 import { buildOddsTradeSignal, matchMarketToEvent } from '@/lib/marketMatcher'
 import { buildSignals } from '@/lib/signals'
+import { buildLearnedModel } from '@/lib/learning'
+import { useBankrollStore } from '@/store/bankroll'
 import type { Market, TradeSignal } from '@/lib/types'
 
 // ---------------------------------------------------------------------------
@@ -258,6 +260,17 @@ export function useOddsSignals(markets: Market[]): UseOddsSignalsResult {
   // -------------------------------------------------------------------------
   const events = eventsQuery.data ?? []
 
+  // Closed-loop learning: rebuild the calibration model from resolved paper
+  // trades whenever that history changes. The structural fallback below feeds
+  // it into `buildSignals` so future bets are sized / chosen against the
+  // calibrated probability rather than the raw structural nudges. Stays
+  // identity until enough bets have resolved (see `lib/learning.ts`).
+  const closedPositions = useBankrollStore((s) => s.closedPositions)
+  const learnedModel = useMemo(
+    () => buildLearnedModel(closedPositions),
+    [closedPositions],
+  )
+
   const oddsSignals = useMemo(() => {
     if (markets.length === 0) return []
 
@@ -280,13 +293,15 @@ export function useOddsSignals(markets: Market[]): UseOddsSignalsResult {
     // the correct `signal_source` without inspecting the structural
     // pipeline's internals.
     const unmatched = markets.filter((m) => !matchedIds.has(m.id))
-    const structural: TradeSignal[] = buildSignals(unmatched).map((s) => ({
+    const structural: TradeSignal[] = buildSignals(unmatched, {
+      calibration: learnedModel,
+    }).map((s) => ({
       ...s,
       signalSource: 'structural' as const,
     }))
 
     return [...matched, ...structural].sort((a, b) => b.edgePct - a.edgePct)
-  }, [markets, events])
+  }, [markets, events, learnedModel])
 
   const quotaRemaining = useOddsQuotaStore((s) => s.remaining)
 

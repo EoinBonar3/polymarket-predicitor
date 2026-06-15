@@ -187,6 +187,22 @@ export interface Position {
   placedAt: string
   resolvedAt?: string
   profit?: number
+  /**
+   * Signal provenance captured at bet time, used by the closed-loop learner
+   * (`lib/learning.ts`) to attribute realised performance back to the signals
+   * that produced the bet. All optional — older positions / odds-api bets may
+   * not carry them, and the learner treats absence as "no attribution".
+   */
+  signalSource?: TradeSignalSource
+  /** How many structural signals fired (1, 2, or 3) — structural bets only. */
+  signalCount?: number
+  signalStrength?: 'weak' | 'moderate' | 'strong'
+  /** Which of the three structural signals fired for this bet. */
+  activeSignals?: {
+    volumeSpike: boolean
+    priceMomentum: boolean
+    staleMarket: boolean
+  }
 }
 
 export interface BankrollHistoryPoint {

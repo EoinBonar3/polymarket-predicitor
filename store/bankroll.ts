@@ -206,6 +206,13 @@ export const useBankrollStore = create<BankrollState>()(
           ourProbability,
           status: 'open',
           placedAt: now,
+          // Signal provenance for the closed-loop learner. Captured from the
+          // triggering `TradeSignal` so resolved bets can be attributed back to
+          // the signals that produced them (`lib/learning.ts`).
+          signalSource: signal?.signalSource,
+          signalCount: signal?.signalCount,
+          signalStrength: signal?.signalStrength,
+          activeSignals: signal?.probabilityBreakdown?.activeSignals,
         }
 
         const newBalance = Math.round((balance - roundedStake) * 100) / 100

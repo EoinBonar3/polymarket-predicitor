@@ -49,6 +49,32 @@ const STALE_NUDGE_PP = 0.03
 const OUR_P_FLOOR = 0.05
 const OUR_P_CEIL = 0.95
 
+/**
+ * Per-signal reliability multipliers learned from resolved bets
+ * (`lib/learning.ts`). Each scales its signal's nudge magnitude: 1 = trust the
+ * default weight, <1 = the signal historically over-claimed edge (shrink it),
+ * 0 = the signal carried no edge at all (retired — its nudge vanishes, so it
+ * still counts toward the gate but contributes nothing to `ourP`).
+ *
+ * Defaults to all-ones (no change) so callers that don't pass it — and the
+ * cold-start period before any bets resolve — behave exactly as before.
+ */
+export interface SignalReliability {
+  volumeSpike: number
+  priceMomentum: number
+  staleMarket: number
+}
+
+const DEFAULT_RELIABILITY: SignalReliability = {
+  volumeSpike: 1,
+  priceMomentum: 1,
+  staleMarket: 1,
+}
+
+export interface ComputeStructuralOptions {
+  reliability?: SignalReliability
+}
+
 /** Display weights for the UI contribution bars (equal thirds). */
 export const STRUCTURAL_SIGNAL_WEIGHTS = {
   volumeSpike: 1 / 3,
@@ -328,11 +354,12 @@ function buildBreakdown(
   yes: number,
   signals: StructuralSignalResult['signals'],
   ourP: number,
+  reliability: SignalReliability,
 ): ProbabilityBreakdown {
   return {
-    volumeSpike: standaloneSignalP(yes, signals.volumeSpike, VOLUME_SPIKE_NUDGE_PP),
-    priceMomentum: standaloneSignalP(yes, signals.priceMomentum, MOMENTUM_NUDGE_PP),
-    staleMarket: standaloneSignalP(yes, signals.staleMarket, STALE_NUDGE_PP),
+    volumeSpike: standaloneSignalP(yes, signals.volumeSpike, VOLUME_SPIKE_NUDGE_PP * reliability.volumeSpike),
+    priceMomentum: standaloneSignalP(yes, signals.priceMomentum, MOMENTUM_NUDGE_PP * reliability.priceMomentum),
+    staleMarket: standaloneSignalP(yes, signals.staleMarket, STALE_NUDGE_PP * reliability.staleMarket),
     blended: ourP,
     weights: { ...STRUCTURAL_SIGNAL_WEIGHTS },
     activeSignals: {
@@ -343,7 +370,11 @@ function buildBreakdown(
   }
 }
 
-function computeOurP(yes: number, signals: StructuralSignalResult['signals']): number {
+function computeOurP(
+  yes: number,
+  signals: StructuralSignalResult['signals'],
+  reliability: SignalReliability,
+): number {
   let ourP = yes
 
   const applyNudge = (state: StructuralSignalState, magnitudePp: number) => {
@@ -352,9 +383,9 @@ function computeOurP(yes: number, signals: StructuralSignalResult['signals']): n
     ourP = nudgeFromDirection(ourP, direction, magnitudePp)
   }
 
-  applyNudge(signals.volumeSpike, VOLUME_SPIKE_NUDGE_PP)
-  applyNudge(signals.priceMomentum, MOMENTUM_NUDGE_PP)
-  applyNudge(signals.staleMarket, STALE_NUDGE_PP)
+  applyNudge(signals.volumeSpike, VOLUME_SPIKE_NUDGE_PP * reliability.volumeSpike)
+  applyNudge(signals.priceMomentum, MOMENTUM_NUDGE_PP * reliability.priceMomentum)
+  applyNudge(signals.staleMarket, STALE_NUDGE_PP * reliability.staleMarket)
 
   return clampOurP(ourP)
 }
@@ -363,9 +394,17 @@ function computeOurP(yes: number, signals: StructuralSignalResult['signals']): n
  * Evaluate the 3-signal structural model for a market.
  *
  * Returns `ourP: null` only when no signal fires (gate failure).
+ *
+ * `options.reliability` (from the closed-loop learner) scales each signal's
+ * nudge by how well that signal has historically predicted outcomes. Omitted
+ * → all-ones, i.e. the original fixed 5/4/3pp weights.
  */
-export function computeStructuralSignal(market: Market): StructuralSignalResult {
+export function computeStructuralSignal(
+  market: Market,
+  options: ComputeStructuralOptions = {},
+): StructuralSignalResult {
   const yes = safeYesPrice(market)
+  const reliability = options.reliability ?? DEFAULT_RELIABILITY
 
   const signals = {
     volumeSpike: evaluateVolumeSpikeSignal(market, yes),
@@ -392,7 +431,7 @@ export function computeStructuralSignal(market: Market): StructuralSignalResult 
     }
   }
 
-  const ourP = computeOurP(yes, signals)
+  const ourP = computeOurP(yes, signals, reliability)
 
   return {
     ourP,
@@ -402,6 +441,6 @@ export function computeStructuralSignal(market: Market): StructuralSignalResult 
     signalStrength: strengthFromCount(activeSignalCount),
     rejectionReason: null,
     signals,
-    breakdown: buildBreakdown(yes, signals, ourP),
+    breakdown: buildBreakdown(yes, signals, ourP, reliability),
   }
 }

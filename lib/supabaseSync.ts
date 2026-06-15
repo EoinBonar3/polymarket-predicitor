@@ -30,6 +30,17 @@
 //   ALTER TABLE signals_log ALTER COLUMN edge DROP NOT NULL;
 //   ALTER TABLE signals_log ALTER COLUMN kelly_fraction DROP NOT NULL;
 //   ALTER TABLE signals_log ALTER COLUMN suggested_stake DROP NOT NULL;
+//
+// Closed-loop learner (`lib/learning.ts`) — signal provenance on `positions`,
+// so resolved bets can be attributed back to the signals that produced them.
+// All nullable (odds-api / legacy bets carry no structural breakdown):
+//
+//   ALTER TABLE positions ADD COLUMN IF NOT EXISTS signal_source text;
+//   ALTER TABLE positions ADD COLUMN IF NOT EXISTS signal_count int;
+//   ALTER TABLE positions ADD COLUMN IF NOT EXISTS signal_strength text;
+//   ALTER TABLE positions ADD COLUMN IF NOT EXISTS active_volume_spike boolean;
+//   ALTER TABLE positions ADD COLUMN IF NOT EXISTS active_price_momentum boolean;
+//   ALTER TABLE positions ADD COLUMN IF NOT EXISTS active_stale_market boolean;
 // ---------------------------------------------------------------------------
 
 import { supabase, type SupabasePosition } from './supabase'
@@ -65,6 +76,13 @@ function toRow(p: SluggedPosition): SupabasePosition {
     resolved_at: p.resolvedAt ?? null,
     profit: p.profit ?? null,
     market_slug: p.slug ?? null,
+    // Signal provenance for the closed-loop learner.
+    signal_source: p.signalSource ?? null,
+    signal_count: p.signalCount ?? null,
+    signal_strength: p.signalStrength ?? null,
+    active_volume_spike: p.activeSignals?.volumeSpike ?? null,
+    active_price_momentum: p.activeSignals?.priceMomentum ?? null,
+    active_stale_market: p.activeSignals?.staleMarket ?? null,
   }
 }
 
@@ -82,11 +100,29 @@ function fromRow(r: SupabasePosition): Position & { slug: string } {
     shares: Number(r.shares),
     potentialPayout: Number(r.potential_payout),
     signalEdge: Number(r.signal_edge),
+    ourProbability: r.our_probability == null ? undefined : Number(r.our_probability),
     status: r.status,
     placedAt: r.placed_at,
     resolvedAt: r.resolved_at ?? undefined,
     profit: r.profit == null ? undefined : Number(r.profit),
     slug: r.market_slug ?? '',
+    // Signal provenance — feeds the closed-loop learner after rehydration.
+    signalSource:
+      r.signal_source === 'structural' || r.signal_source === 'odds_api'
+        ? r.signal_source
+        : undefined,
+    signalCount: r.signal_count == null ? undefined : Number(r.signal_count),
+    signalStrength: r.signal_strength ?? undefined,
+    activeSignals:
+      r.active_volume_spike == null &&
+      r.active_price_momentum == null &&
+      r.active_stale_market == null
+        ? undefined
+        : {
+            volumeSpike: r.active_volume_spike === true,
+            priceMomentum: r.active_price_momentum === true,
+            staleMarket: r.active_stale_market === true,
+          },
   }
 }
 

@@ -26,6 +26,7 @@ import { cn, formatCurrency, formatPercent, formatProfit } from '@/lib/utils'
 import { useBankrollStore, type BankrollPosition } from '@/store/bankroll'
 import type { BankrollHistoryPoint, Outcome } from '@/lib/types'
 import { buildCalibrationData } from '@/lib/calibration'
+import { buildLearnedModel, type LearnedModel } from '@/lib/learning'
 import { CalibrationChart } from '@/components/charts/CalibrationChart'
 import { CalibrationStats } from '@/components/charts/CalibrationStats'
 
@@ -71,6 +72,12 @@ export default function PerformancePage() {
     () => buildCalibrationData(closedPositions),
     [closedPositions],
   )
+  // What the closed-loop learner has derived from resolved bets — the same
+  // model that's live in the signal engine via `useOddsSignals`.
+  const learning = useMemo(
+    () => buildLearnedModel(closedPositions),
+    [closedPositions],
+  )
 
   const hasActivity = closedPositions.length > 0 || openPositions.length > 0
 
@@ -97,6 +104,7 @@ export default function PerformancePage() {
           <StatsRow stats={stats} />
           <ClosedPositionsTable rows={closedPositions} />
           <CalibrationSection data={calibrationData} />
+          <LearningSection learning={learning} />
         </>
       )}
     </div>
@@ -126,6 +134,176 @@ function CalibrationSection({
       </div>
       <CalibrationStats data={data} />
       <CalibrationChart data={data} />
+    </section>
+  )
+}
+
+function LearningSection({ learning }: { learning: LearnedModel }) {
+  const { active, totalSamples, overconfidence, kellyMultiplier, signalStats, comboStats } =
+    learning
+  const samplesUntilActive = Math.max(0, 20 - totalSamples)
+
+  const biasPp = Math.abs(overconfidence) * 100
+  const biasLabel =
+    biasPp < 0.5
+      ? 'Well calibrated'
+      : overconfidence > 0
+        ? `Overconfident by ${biasPp.toFixed(1)}pp`
+        : `Underconfident by ${biasPp.toFixed(1)}pp`
+
+  return (
+    <section aria-labelledby="model-learning" className="space-y-3">
+      <div className="flex items-baseline justify-between">
+        <h2
+          id="model-learning"
+          className="text-lg font-semibold tracking-tight text-white"
+        >
+          What the model has learned
+          <span className="ml-2 text-sm font-normal text-gray-500">
+            {totalSamples} structural bets resolved
+          </span>
+        </h2>
+        <span
+          className={cn(
+            'rounded-full px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide ring-1',
+            active
+              ? 'bg-emerald-500/15 text-emerald-300 ring-emerald-400/30'
+              : 'bg-gray-700/30 text-gray-300 ring-gray-500/30',
+          )}
+        >
+          {active ? 'Live' : 'Learning'}
+        </span>
+      </div>
+
+      {!active ? (
+        <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-4 sm:p-6">
+          <p className="text-sm text-gray-400">
+            The signal engine is still using its default weights. Once{' '}
+            <strong className="text-gray-200">{samplesUntilActive}</strong> more
+            structural bet{samplesUntilActive === 1 ? '' : 's'} resolve, it
+            starts (1) shrinking each signal&apos;s influence toward what it has
+            actually predicted, (2) scaling Kelly down if it&apos;s been
+            overconfident, and (3) flagging signals that carry no edge. The
+            tables below preview those numbers as data accrues.
+          </p>
+        </div>
+      ) : null}
+
+      <section
+        aria-label="Learning summary"
+        className="grid grid-cols-2 gap-3 sm:grid-cols-3"
+      >
+        <StatCard
+          label="Kelly sizing"
+          value={`${Math.round(kellyMultiplier * 100)}%`}
+          hint={kellyMultiplier < 1 ? 'shrunk for overconfidence' : 'full Kelly'}
+          tone={kellyMultiplier < 1 ? 'negative' : 'positive'}
+        />
+        <StatCard
+          label="Calibration"
+          value={biasLabel}
+          hint={`Brier ${learning.brierScore.toFixed(3)}`}
+          tone={biasPp < 0.5 ? 'positive' : 'negative'}
+        />
+        <StatCard
+          label="Live"
+          value={active ? 'Yes' : 'No'}
+          hint={active ? 'corrections applied' : `needs ${samplesUntilActive} more`}
+          tone={active ? 'positive' : 'neutral'}
+        />
+      </section>
+
+      <div className="overflow-x-auto rounded-xl border border-gray-800 bg-gray-900/40">
+        <table className="min-w-full divide-y divide-gray-800 text-sm">
+          <thead className="bg-gray-900/60 text-left text-[11px] uppercase tracking-wider text-gray-400">
+            <tr>
+              <th scope="col" className="px-4 py-3 font-medium">Signal</th>
+              <th scope="col" className="px-4 py-3 font-medium text-right">Bets</th>
+              <th scope="col" className="px-4 py-3 font-medium text-right">Win rate</th>
+              <th scope="col" className="px-4 py-3 font-medium text-right">Claimed → Realised edge</th>
+              <th scope="col" className="px-4 py-3 font-medium text-right">Weight ×</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-800 text-gray-200">
+            {signalStats.map((s) => (
+              <tr key={s.key}>
+                <td className="px-4 py-3 font-medium text-gray-100">
+                  {s.label}
+                  {s.retired ? (
+                    <span className="ml-2 rounded-full bg-rose-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-rose-300 ring-1 ring-rose-400/30">
+                      retired
+                    </span>
+                  ) : null}
+                </td>
+                <td className="px-4 py-3 text-right tabular-nums text-gray-400">
+                  {s.bets}
+                </td>
+                <td className="px-4 py-3 text-right tabular-nums">
+                  {s.bets > 0 ? formatPercent(s.winRate) : '—'}
+                  {s.bets > 0 ? (
+                    <span className="ml-1 text-[10px] text-gray-500">
+                      ±{Math.round(((s.upper - s.lower) / 2) * 100)}
+                    </span>
+                  ) : null}
+                </td>
+                <td className="px-4 py-3 text-right tabular-nums text-gray-400">
+                  {s.bets > 0
+                    ? `${(s.claimedEdge * 100).toFixed(1)} → ${(s.realizedEdge * 100).toFixed(1)}pp`
+                    : '—'}
+                </td>
+                <td
+                  className={cn(
+                    'px-4 py-3 text-right font-semibold tabular-nums',
+                    s.reliability < 0.9 && 'text-rose-300',
+                    s.reliability > 1.1 && 'text-emerald-300',
+                    s.reliability >= 0.9 && s.reliability <= 1.1 && 'text-gray-300',
+                  )}
+                >
+                  {s.reliability.toFixed(2)}×
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {comboStats.length > 0 ? (
+        <div className="overflow-x-auto rounded-xl border border-gray-800 bg-gray-900/40">
+          <table className="min-w-full divide-y divide-gray-800 text-sm">
+            <thead className="bg-gray-900/60 text-left text-[11px] uppercase tracking-wider text-gray-400">
+              <tr>
+                <th scope="col" className="px-4 py-3 font-medium">Combination that fired</th>
+                <th scope="col" className="px-4 py-3 font-medium text-right">Bets</th>
+                <th scope="col" className="px-4 py-3 font-medium text-right">Win rate (95% CI)</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-800 text-gray-200">
+              {comboStats.map((c) => (
+                <tr key={c.label}>
+                  <td className="px-4 py-3 text-gray-100">{c.label}</td>
+                  <td className="px-4 py-3 text-right tabular-nums text-gray-400">
+                    {c.bets}
+                  </td>
+                  <td className="px-4 py-3 text-right tabular-nums">
+                    {formatPercent(c.winRate)}
+                    <span className="ml-1 text-[10px] text-gray-500">
+                      ({Math.round(c.lower * 100)}–{Math.round(c.upper * 100)})
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+
+      <p className="text-[11px] text-gray-500">
+        Weight × scales each signal&apos;s nudge by realised ÷ claimed edge
+        (shrunk toward 1 by sample count); a signal stuck near 0 is retired.
+        Kelly sizing shrinks globally when wins lag predictions. A bet that fired
+        multiple signals counts toward each — the combination table isolates the
+        single-signal cases.
+      </p>
     </section>
   )
 }
