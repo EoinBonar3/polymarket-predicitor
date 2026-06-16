@@ -108,7 +108,10 @@ function fromRow(r: SupabasePosition): Position & { slug: string } {
     slug: r.market_slug ?? '',
     // Signal provenance — feeds the closed-loop learner after rehydration.
     signalSource:
-      r.signal_source === 'structural' || r.signal_source === 'odds_api'
+      r.signal_source === 'structural' ||
+      r.signal_source === 'odds_api' ||
+      r.signal_source === 'kalshi' ||
+      r.signal_source === 'manifold'
         ? r.signal_source
         : undefined,
     signalCount: r.signal_count == null ? undefined : Number(r.signal_count),

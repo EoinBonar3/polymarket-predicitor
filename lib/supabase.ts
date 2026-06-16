@@ -13,7 +13,22 @@ import { createClient } from '@supabase/supabase-js'
 const url = process.env.NEXT_PUBLIC_SUPABASE_URL
 const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
 
+// Eager singleton used by Next.js app routes (env vars are set before modules load there).
 export const supabase = url && key ? createClient(url, key) : null
+
+// Lazy getter for scripts that load .env.local manually after module init.
+// TypeScript hoists all imports before the env-loading code runs, so the
+// eager `supabase` above is always null in scripts. Use this instead.
+// Return type matches `typeof supabase` exactly so callers type-check cleanly.
+let _scriptClient: typeof supabase | undefined = undefined
+export function getDb(): typeof supabase {
+  if (_scriptClient !== undefined) return _scriptClient
+  const u = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const k = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+  _scriptClient = u && k ? createClient(u, k) : null
+  if (!_scriptClient) console.error('[supabase] getDb: env vars not set — Supabase unavailable')
+  return _scriptClient
+}
 
 // ---------------------------------------------------------------------------
 // Row shapes — snake_case mirror of the Postgres tables we own.
@@ -41,7 +56,7 @@ export type SupabasePosition = {
   // Signal provenance for the closed-loop learner (`lib/learning.ts`). All
   // nullable — odds-api / legacy bets may not carry the structural breakdown.
   // See the migration note at the top of `lib/supabaseSync.ts`.
-  signal_source?: 'structural' | 'odds_api' | null
+  signal_source?: 'structural' | 'odds_api' | 'kalshi' | 'manifold' | null
   signal_count?: number | null
   signal_strength?: 'weak' | 'moderate' | 'strong' | null
   active_volume_spike?: boolean | null

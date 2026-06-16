@@ -20,6 +20,7 @@ export const metadata: Metadata = {
 
 const NAV_LINKS: ReadonlyArray<{ href: string; label: string }> = [
   { href: '/dashboard', label: 'Dashboard' },
+  { href: '/manifold', label: 'Manifold' },
   { href: '/portfolio', label: 'Portfolio' },
   { href: '/performance', label: 'Performance' },
 ]

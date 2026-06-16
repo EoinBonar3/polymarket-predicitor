@@ -302,7 +302,8 @@ function filterMarketFeed(events: GammaEvent[]): FeedFilterResult {
     const days = daysToExpiry(market.endDate)
     const keep =
       days !== null &&
-      days >= MIN_DAYS_TO_EXPIRY
+      days >= MIN_DAYS_TO_EXPIRY &&
+      days <= MAX_DAYS_TO_EXPIRY
     if (!keep) {
       recordRejection(rejectionCounts, 'Expiry out of range', {
         id: market.id,

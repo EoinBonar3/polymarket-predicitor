@@ -119,10 +119,13 @@ export type TradeSignalConfidence = 'high' | 'medium' | 'low'
  *   - 'odds_api'   → matched a sports event in The Odds API; `ourProbability`
  *                    is the vig-removed bookmaker consensus for the matched
  *                    outcome (much stronger than the structural blender).
- *   - 'structural' → no Odds API match; `ourProbability` came from the
+ *   - 'kalshi'     → matched a Kalshi market for the same event (Gemini-
+ *                    confirmed); `ourProbability` is Kalshi's YES price,
+ *                    aligned to the Polymarket YES outcome.
+ *   - 'structural' → no external match; `ourProbability` came from the
  *                    liquidity / time / volume blender in `lib/probability.ts`.
  */
-export type TradeSignalSource = 'odds_api' | 'structural'
+export type TradeSignalSource = 'odds_api' | 'kalshi' | 'structural' | 'manifold'
 
 /** Confidence bucket emitted by the `lib/marketMatcher` fuzzy matcher. */
 export type TradeSignalMatchConfidence = 'HIGH' | 'MEDIUM' | 'LOW'
@@ -280,6 +283,14 @@ export interface GammaMarket {
   archived?: boolean
   resolved?: boolean
   resolvedOutcome?: string | null
+  /**
+   * UMA oracle settlement status. Gamma does NOT expose `resolved`/
+   * `resolvedOutcome` — a settled market is `closed: true` with
+   * `umaResolutionStatus: "resolved"` and the winning leg priced 1 in
+   * `outcomePrices`. These are the fields the resolver actually reads.
+   */
+  umaResolutionStatus?: string
+  automaticallyResolved?: boolean
 }
 
 export interface GammaEvent {

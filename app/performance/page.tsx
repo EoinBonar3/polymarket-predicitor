@@ -139,7 +139,7 @@ function CalibrationSection({
 }
 
 function LearningSection({ learning }: { learning: LearnedModel }) {
-  const { active, totalSamples, overconfidence, kellyMultiplier, signalStats, comboStats } =
+  const { active, totalSamples, overconfidence, kellyMultiplier, signalStats, comboStats, sourceStats } =
     learning
   const samplesUntilActive = Math.max(0, 20 - totalSamples)
 
@@ -213,6 +213,70 @@ function LearningSection({ learning }: { learning: LearnedModel }) {
         />
       </section>
 
+      {sourceStats.length > 0 ? (
+        <div className="space-y-2">
+          <h3 className="text-sm font-semibold text-gray-200">
+            Calibration by source
+          </h3>
+          <div className="overflow-x-auto rounded-xl border border-gray-800 bg-gray-900/40">
+            <table className="min-w-full divide-y divide-gray-800 text-sm">
+              <thead className="bg-gray-900/60 text-left text-[11px] uppercase tracking-wider text-gray-400">
+                <tr>
+                  <th scope="col" className="px-4 py-3 font-medium">Source</th>
+                  <th scope="col" className="px-4 py-3 font-medium text-right">Bets</th>
+                  <th scope="col" className="px-4 py-3 font-medium text-right">Win rate (95% CI)</th>
+                  <th scope="col" className="px-4 py-3 font-medium text-right">Brier</th>
+                  <th scope="col" className="px-4 py-3 font-medium text-right">Claimed → Realised edge</th>
+                  <th scope="col" className="px-4 py-3 font-medium text-right">Overconfidence</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-800 text-gray-200">
+                {sourceStats.map((s) => (
+                  <tr key={s.source}>
+                    <td className="px-4 py-3 font-medium text-gray-100">{s.label}</td>
+                    <td className="px-4 py-3 text-right tabular-nums text-gray-400">{s.bets}</td>
+                    <td className="px-4 py-3 text-right tabular-nums">
+                      {formatPercent(s.winRate)}
+                      <span className="ml-1 text-[10px] text-gray-500">
+                        ({Math.round(s.lower * 100)}–{Math.round(s.upper * 100)})
+                      </span>
+                    </td>
+                    <td
+                      className={cn(
+                        'px-4 py-3 text-right tabular-nums',
+                        s.brierScore < 0.2 && 'text-emerald-300',
+                        s.brierScore > 0.25 && 'text-rose-300',
+                        s.brierScore >= 0.2 && s.brierScore <= 0.25 && 'text-amber-300',
+                      )}
+                    >
+                      {s.brierScore.toFixed(3)}
+                    </td>
+                    <td className="px-4 py-3 text-right tabular-nums text-gray-400">
+                      {`${(s.claimedEdge * 100).toFixed(1)} → ${(s.realizedEdge * 100).toFixed(1)}pp`}
+                    </td>
+                    <td
+                      className={cn(
+                        'px-4 py-3 text-right font-semibold tabular-nums',
+                        Math.abs(s.overconfidence) <= 0.05 && 'text-emerald-300',
+                        Math.abs(s.overconfidence) > 0.1 && 'text-rose-300',
+                        Math.abs(s.overconfidence) > 0.05 &&
+                          Math.abs(s.overconfidence) <= 0.1 &&
+                          'text-amber-300',
+                      )}
+                    >
+                      {`${s.overconfidence > 0 ? '+' : ''}${(s.overconfidence * 100).toFixed(1)}pp`}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : null}
+
+      <h3 className="text-sm font-semibold text-gray-200">
+        Per-signal reliability (structural)
+      </h3>
       <div className="overflow-x-auto rounded-xl border border-gray-800 bg-gray-900/40">
         <table className="min-w-full divide-y divide-gray-800 text-sm">
           <thead className="bg-gray-900/60 text-left text-[11px] uppercase tracking-wider text-gray-400">

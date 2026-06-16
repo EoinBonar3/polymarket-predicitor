@@ -99,6 +99,54 @@ export interface ComboWinStats {
   upper: number
 }
 
+/**
+ * Per-source calibration — the Phase 0 instrument. Where the structural
+ * `SignalWinStats` decomposes the three structural nudges, this decomposes by
+ * *signal source* (`odds_api` vs `structural` vs future anchors). This is how
+ * you read which sources actually carry edge, so the engine can be steered
+ * toward anchored signals and away from ungrounded ones.
+ */
+export interface SourceStats {
+  source: TradeSignalSource
+  label: string
+  bets: number
+  wins: number
+  winRate: number
+  /** Wilson 95% CI on the win rate. */
+  lower: number
+  upper: number
+  /** Brier score for this source's bets (lower = better; random = 0.25). */
+  brierScore: number
+  /** Mean probability this source assigned to the side we bet. */
+  meanPredicted: number
+  /** Mean edge claimed (predicted − entry price). */
+  claimedEdge: number
+  /** Mean edge realised (outcome − entry price). */
+  realizedEdge: number
+  /** meanPredicted − actual win rate. +ve = this source is overconfident. */
+  overconfidence: number
+}
+
+/**
+ * Per-source betting correction — the actionable output of the per-source
+ * calibration. The auto-bet cron applies this to FUTURE bets: it skips sources
+ * that have proven unprofitable and shrinks the stake on sources that win less
+ * often than they predict. This is what turns the calibration tables from a
+ * read-only dashboard into a closed feedback loop.
+ */
+export interface SourceCorrection {
+  source: TradeSignalSource
+  label: string
+  /** false → stop auto-betting this source (realised edge ≤ 0 over a real sample). */
+  enabled: boolean
+  /** Stake multiplier in [MIN_KELLY_MULTIPLIER, 1] applied to the suggested stake. */
+  kellyMultiplier: number
+  /** Resolved bets backing this correction. */
+  samples: number
+  /** Human-readable explanation — logged by the cron and shown on the dashboard. */
+  reason: string
+}
+
 export interface LearnedModel {
   /** Layer 1 — per-signal nudge multipliers, ready to pass to probability.ts. */
   reliability: SignalReliability
@@ -108,6 +156,10 @@ export interface LearnedModel {
   signalStats: SignalWinStats[]
   /** Layer 3 — per-combination diagnostics (single + multi-signal). */
   comboStats: ComboWinStats[]
+  /** Per-source calibration across ALL resolved bets (not just structural). */
+  sourceStats: SourceStats[]
+  /** Per-source corrections the auto-bet cron applies to future bets. */
+  sourceCorrections: SourceCorrection[]
   /** Mean (predicted − actual) across structural bets. +ve = overconfident. */
   overconfidence: number
   brierScore: number
@@ -149,7 +201,10 @@ function resolvedBetsFrom(positions: Position[]): ResolvedBet[] {
       0.99,
     )
     const source: TradeSignalSource =
-      p.signalSource === 'odds_api' || p.signalSource === 'structural'
+      p.signalSource === 'odds_api' ||
+      p.signalSource === 'structural' ||
+      p.signalSource === 'kalshi' ||
+      p.signalSource === 'manifold'
         ? p.signalSource
         : Math.abs(edge) > ODDS_API_EDGE_PROXY
           ? 'odds_api'
@@ -253,6 +308,127 @@ function brierFrom(bets: ResolvedBet[]): number {
   return sum / bets.length
 }
 
+const SOURCE_LABELS: Record<TradeSignalSource, string> = {
+  odds_api: 'Odds API (sports)',
+  kalshi: 'Kalshi (cross-market)',
+  structural: 'Structural',
+  manifold: 'Manifold (baseline)',
+}
+
+/**
+ * Per-source calibration across every resolved bet. Grouped by the source
+ * captured at bet time, so `odds_api` (anchored) and `structural` (heuristic)
+ * are scored side by side. This is the readout that tells you which sources to
+ * trust as more come online in later phases.
+ */
+function sourceStatsFrom(bets: ResolvedBet[]): SourceStats[] {
+  const groups = new Map<TradeSignalSource, ResolvedBet[]>()
+  for (const b of bets) {
+    const arr = groups.get(b.source) ?? []
+    arr.push(b)
+    groups.set(b.source, arr)
+  }
+
+  const stats: SourceStats[] = []
+  for (const [source, members] of groups) {
+    const n = members.length
+    const wins = members.reduce((acc, b) => acc + b.outcome, 0)
+    const winRate = n > 0 ? wins / n : 0
+    const { lower, upper } = wilsonInterval(wins, n)
+    const meanPredicted = n > 0 ? members.reduce((acc, b) => acc + b.predicted, 0) / n : 0
+    const claimedEdge = n > 0 ? members.reduce((acc, b) => acc + (b.predicted - b.price), 0) / n : 0
+    const realizedEdge = n > 0 ? members.reduce((acc, b) => acc + (b.outcome - b.price), 0) / n : 0
+
+    stats.push({
+      source,
+      label: SOURCE_LABELS[source] ?? source,
+      bets: n,
+      wins,
+      winRate,
+      lower,
+      upper,
+      brierScore: brierFrom(members),
+      meanPredicted,
+      claimedEdge,
+      realizedEdge,
+      overconfidence: meanPredicted - winRate,
+    })
+  }
+
+  return stats.sort((a, b) => b.bets - a.bets)
+}
+
+// ---------------------------------------------------------------------------
+// Per-source corrections (the closed-loop actuator)
+// ---------------------------------------------------------------------------
+
+/**
+ * Turn one source's calibration into an actionable betting correction.
+ *
+ *   - Cold start (< MIN_ACTIVE_SAMPLES resolved): bet at full Kelly. We never
+ *     penalise a source before there's enough data to judge it.
+ *   - Proven unprofitable (realised edge ≤ 0 over a real sample): DISABLE it.
+ *     This is the direct profitability test — if outcomes don't beat the entry
+ *     prices on average, the source has no demonstrated edge, so stop betting.
+ *   - Profitable but overconfident: shrink Kelly by the win-rate/predicted
+ *     ratio (mirrors the global Layer-2 logic), never amplifying above full.
+ */
+function sourceCorrectionFrom(s: SourceStats): SourceCorrection {
+  if (s.bets < MIN_ACTIVE_SAMPLES) {
+    return {
+      source: s.source,
+      label: s.label,
+      enabled: true,
+      kellyMultiplier: 1,
+      samples: s.bets,
+      reason: `cold start (${s.bets}/${MIN_ACTIVE_SAMPLES} resolved) — full Kelly`,
+    }
+  }
+  if (s.realizedEdge <= 0) {
+    return {
+      source: s.source,
+      label: s.label,
+      enabled: false,
+      kellyMultiplier: 0,
+      samples: s.bets,
+      reason: `disabled — realised edge ${(s.realizedEdge * 100).toFixed(1)}pp ≤ 0 over ${s.bets} bets`,
+    }
+  }
+  const ratio = s.meanPredicted > 0 ? s.winRate / s.meanPredicted : 1
+  const kellyMultiplier = clamp(ratio, MIN_KELLY_MULTIPLIER, 1)
+  return {
+    source: s.source,
+    label: s.label,
+    enabled: true,
+    kellyMultiplier,
+    samples: s.bets,
+    reason:
+      kellyMultiplier < 1
+        ? `Kelly ×${kellyMultiplier.toFixed(2)} — won ${(s.winRate * 100).toFixed(0)}% vs predicted ${(s.meanPredicted * 100).toFixed(0)}%`
+        : `full Kelly — calibrated (won ${(s.winRate * 100).toFixed(0)}% vs predicted ${(s.meanPredicted * 100).toFixed(0)}%)`,
+  }
+}
+
+/**
+ * The correction for a given source, defaulting to permissive full-Kelly when
+ * the source has no resolved bets yet (so a brand-new anchor isn't blocked).
+ */
+export function correctionForSource(
+  model: LearnedModel,
+  source: TradeSignalSource,
+): SourceCorrection {
+  const found = model.sourceCorrections.find((c) => c.source === source)
+  if (found) return found
+  return {
+    source,
+    label: SOURCE_LABELS[source] ?? source,
+    enabled: true,
+    kellyMultiplier: 1,
+    samples: 0,
+    reason: 'no resolved bets yet — full Kelly',
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Model construction
 // ---------------------------------------------------------------------------
@@ -291,11 +467,15 @@ export function buildLearnedModel(positions: Position[]): LearnedModel {
       ? clamp(actualWinRate / meanPredicted, MIN_KELLY_MULTIPLIER, 1)
       : 1
 
+  const sourceStats = sourceStatsFrom(bets)
+
   return {
     reliability,
     kellyMultiplier,
     signalStats,
     comboStats: comboStatsFrom(structural),
+    sourceStats,
+    sourceCorrections: sourceStats.map(sourceCorrectionFrom),
     overconfidence,
     brierScore: brierFrom(structural),
     totalSamples,

@@ -92,11 +92,32 @@ function extractYesNoPrices(raw: GammaMarket): { yes: number; no: number } {
   return { yes, no }
 }
 
-function normaliseResolvedOutcome(value: unknown): 'YES' | 'NO' | null {
-  if (typeof value !== 'string') return null
-  const v = value.toLowerCase()
-  if (v === 'yes') return 'YES'
-  if (v === 'no') return 'NO'
+/**
+ * Definitive YES/NO outcome of a settled market, or null if it isn't cleanly
+ * resolved. Gamma exposes no `resolved`/`resolvedOutcome` fields — a settled
+ * market is `closed: true` with `umaResolutionStatus: "resolved"` (or
+ * `automaticallyResolved: true`), and the winning leg priced ~1 in
+ * `outcomePrices`. We read the winner straight from those prices so the
+ * mapping survives the missing legacy fields.
+ */
+function resolvedOutcomeFrom(raw: GammaMarket): 'YES' | 'NO' | null {
+  const settled =
+    raw.closed === true &&
+    (raw.umaResolutionStatus === 'resolved' || raw.automaticallyResolved === true)
+  if (!settled) return null
+
+  const outcomes = parseOutcomes(raw.outcomes).map((o) => o.toLowerCase())
+  const prices = parseOutcomePrices(raw.outcomePrices)
+  if (outcomes.length !== prices.length || outcomes.length < 2) return null
+
+  // The winning leg settles to 1; require a decisive split so we never settle
+  // a position against a still-uncertain or cancelled (e.g. 0.5/0.5) market.
+  const winIdx = prices.findIndex((p) => p >= 0.99)
+  if (winIdx === -1) return null
+
+  const winner = outcomes[winIdx]
+  if (winner === 'yes') return 'YES'
+  if (winner === 'no') return 'NO'
   return null
 }
 
@@ -119,9 +140,7 @@ function mapGammaMarket(event: GammaEvent, raw: GammaMarket): Market {
     noPrice: no,
     volume24h,
     liquidity,
-    resolvedOutcome: raw.resolved
-      ? normaliseResolvedOutcome(raw.resolvedOutcome)
-      : null,
+    resolvedOutcome: resolvedOutcomeFrom(raw),
   }
 }
 

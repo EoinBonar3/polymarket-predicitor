@@ -31,8 +31,8 @@ export interface CalibrationBucket {
   confidenceLower: number
   /** Wilson 95% CI upper bound on the win rate. */
   confidenceUpper: number
-  /** 'mixed' if the bucket contains both sources, else the unique source. */
-  signalSource: 'odds_api' | 'structural' | 'mixed'
+  /** 'mixed' if the bucket contains multiple sources, else the unique source. */
+  signalSource: 'odds_api' | 'kalshi' | 'structural' | 'manifold' | 'mixed'
 }
 
 export interface CalibrationData {
@@ -59,7 +59,7 @@ export interface CalibrationData {
 export interface CalibrationInput {
   ourProbability: number
   outcome: 0 | 1
-  signalSource: 'odds_api' | 'structural'
+  signalSource: 'odds_api' | 'kalshi' | 'structural' | 'manifold'
 }
 
 // ---------------------------------------------------------------------------
@@ -96,18 +96,21 @@ const ODDS_API_EDGE_PROXY = 0.08
  * prefer the real field over the magnitude proxy.
  */
 type PositionWithMaybeSource = Position & {
-  signal_source?: 'odds_api' | 'structural'
-  signalSource?: 'odds_api' | 'structural'
+  signal_source?: 'odds_api' | 'kalshi' | 'structural' | 'manifold'
+  signalSource?: 'odds_api' | 'kalshi' | 'structural' | 'manifold'
 }
 
 function inferSignalSource(
   position: PositionWithMaybeSource,
-): 'odds_api' | 'structural' {
-  if (position.signal_source === 'odds_api' || position.signal_source === 'structural') {
-    return position.signal_source
-  }
-  if (position.signalSource === 'odds_api' || position.signalSource === 'structural') {
-    return position.signalSource
+): 'odds_api' | 'kalshi' | 'structural' | 'manifold' {
+  const explicit = position.signal_source ?? position.signalSource
+  if (
+    explicit === 'odds_api' ||
+    explicit === 'kalshi' ||
+    explicit === 'structural' ||
+    explicit === 'manifold'
+  ) {
+    return explicit
   }
   return Math.abs(position.signalEdge ?? 0) > ODDS_API_EDGE_PROXY
     ? 'odds_api'
@@ -163,7 +166,7 @@ function formatBucketLabel([lo, hi]: readonly [number, number]): string {
  */
 export function buildBuckets(
   inputs: CalibrationInput[],
-  sourceFilter?: 'odds_api' | 'structural',
+  sourceFilter?: 'odds_api' | 'kalshi' | 'structural' | 'manifold',
 ): CalibrationBucket[] {
   const filtered = sourceFilter
     ? inputs.filter((i) => i.signalSource === sourceFilter)
